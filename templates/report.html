@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>OSINT Research Report - {{ target }}</title>
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; margin: 40px; background-color: #f9f9f9; color: #333; }
+        .container { max-width: 950px; margin: auto; background: white; padding: 35px; border-radius: 8px; box-shadow: 0 0 15px rgba(0,0,0,0.1); }
+        h1, h2, h3, h4 { color: #2c3e50; }
+        .summary { background: #ecf0f1; padding: 20px; border-left: 5px solid #3498db; margin: 20px 0; border-radius: 4px; }
+        .category-header { border-bottom: 2px solid #bdc3c7; padding-bottom: 10px; margin-top: 30px; }
+        .source-card { background: #fdfefe; border: 1px solid #ddd; padding: 15px; margin-bottom: 15px; border-radius: 4px; }
+        .source-url { font-size: 0.9em; color: #3498db; word-break: break-all; }
+        .status-badge { display: inline-block; padding: 3px 8px; font-size: 0.8em; border-radius: 3px; font-weight: bold; background: #e8f8f5; color: #117a65; }
+        .status-badge.failed { background: #fadbd8; color: #78281f; }
+        pre { background: #f4f6f7; padding: 10px; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; font-size: 0.9em; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Watson OSINT Research Report</h1>
+        <p><strong>Date:</strong> {{ date }} | <strong>Target Type:</strong> {{ target_type }} | <strong>Target:</strong> {{ target }}</p>
+        
+        <h2>Executive Summary</h2>
+        <div class="summary">
+            <p>{{ summary }}</p>
+        </div>
+
+        <h2>Sources & Findings</h2>
+
+        <h3 class="category-header">Direct Lookup Tools</h3>
+        {% for source in findings %}{% if source.category == "Direct Lookup" %}
+        <div class="source-card">
+            <h4>{{ source.name }}</h4>
+            <p class="source-url"><a href="{{ source.url }}" target="_blank">{{ source.url }}</a></p>
+            <p><strong>Status:</strong> 
+                <span class="status-badge {% if 'Failed' in source.status %}failed{% endif %}">
+                    {{ source.status }}
+                </span>
+            </p>
+            <p><strong>Findings Summary:</strong></p>
+            <pre>{{ source.notes }}</pre>
+        </div>
+        {% endif %}{% endfor %}
+
+        <h3 class="category-header">Google Dorking Queries</h3>
+        {% for source in findings %}{% if source.category == "Google Dorking Query" %}
+        <div class="source-card">
+            <h4>{{ source.name }}</h4>
+            <p class="source-url"><a href="{{ source.url }}" target="_blank">{{ source.url }}</a></p>
+            <p><strong>Status:</strong> 
+                <span class="status-badge {% if 'Failed' in source.status %}failed{% endif %}">
+                    {{ source.status }}
+                </span>
+            </p>
+            <p><strong>Findings Summary:</strong></p>
+            <pre>{{ source.notes }}</pre>
+        </div>
+        {% endif %}{% endfor %}
+
+        <h2>Deeper Analysis & Intelligence Synthesis</h2>
+        <p>{{ deep_analysis }}</p>
+
+        <h2>Conclusion & Next Steps</h2>
+        <p>{{ conclusion }}</p>
+    </div>
+</body>
+</html>

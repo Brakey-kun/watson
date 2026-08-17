@@ -1,0 +1,57 @@
+{
+  "llm": {
+    "backend": "lm_studio",
+    "host": "127.0.0.1",
+    "port": 1234,
+    "model": "your-model-name-here",
+    "temperature": 0.5,
+    "max_context_tokens": 32768,
+    "max_retries": 3
+  },
+  "backends": {
+    "lm_studio": {
+      "endpoint": "http://127.0.0.1:1234/v1",
+      "api_key": "lm-studio",
+      "model": "your-model-name-here",
+      "temperature": 0.5,
+      "last_tested": null
+    }
+  },
+  "fetcher": {
+    "max_workers": 20,
+    "timeout_seconds": 10,
+    "max_retries": 2,
+    "rate_limit_per_second": 5.0
+  },
+  "search": {
+    "engines": ["google", "bing", "duckduckgo"],
+    "rate_limit_per_engine": 2.0,
+    "jitter_min": 0.5,
+    "jitter_max": 2.0
+  },
+  "quality": {
+    "min_relevance_score": 0.2,
+    "enable_content_dedup": true,
+    "noise_patterns": []
+  },
+  "reporting": {
+    "output_dir": "reports",
+    "template_md": "templates/report.md",
+    "template_html": "templates/report.html"
+  },
+  "tiers": {
+    "thinker": { "model": "", "temperature": null },
+    "default": { "model": "", "temperature": null },
+    "small": { "model": "", "temperature": null }
+  },
+  "burst_search": {
+    "enabled": false,
+    "probe_count": 3
+  },
+  "doubt_search": {
+    "enabled": true,
+    "max_free_attempts": 1,
+    "max_total_attempts": 3
+  },
+  "setup_completed": false
+}
