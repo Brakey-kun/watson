@@ -92,3 +92,31 @@ def close_connection(db_path: str | None = None) -> None:
         _write_locks.pop(db_path, None)
         if conn is not None:
             conn.close()
+
+
+def ensure_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    """Add `column` to `table` if it doesn't already exist (idempotent).
+
+    Every table in this codebase is created via `CREATE TABLE IF NOT
+    EXISTS`, which is idempotent for brand-new columns on a *new* table but
+    silently does nothing for a column added to the schema after some
+    users already have a populated on-disk database -- the old file simply
+    lacks the column, and the first query that references it raises
+    "no such column" at runtime. Call this once (under the table's own
+    write_lock) right after that table's `CREATE TABLE IF NOT EXISTS`, for
+    every column added post-release, to bring existing databases forward.
+
+    Args:
+        conn: An open connection (caller holds write_lock(db_path)).
+        table: Table name (trusted, not user input -- interpolated directly
+            since sqlite3 parameter binding doesn't support identifiers).
+        column: Column name to check/add (same trust assumption).
+        decl: The column type + constraints to append after its name in
+            `ALTER TABLE ... ADD COLUMN`, e.g. "INTEGER NOT NULL DEFAULT 1".
+            SQLite requires ADD COLUMN defaults to be a constant, not an
+            expression, so keep `decl` to simple literal defaults.
+    """
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        conn.commit()

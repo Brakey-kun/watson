@@ -13,14 +13,15 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Optional, Tuple
 
 from osint_workbench.core import paths
 from osint_workbench.core.config import ConfigLoader
-from osint_workbench.core.engine import OSINTEngine
+from osint_workbench.core.engine import DEFAULT_STRATEGY, OSINTEngine, STRATEGIES
 from osint_workbench.core.events import EventBus
 from osint_workbench.core.fetcher import ConcurrentFetcher
 from osint_workbench.core.llm_client import LLMClient
-from osint_workbench.core.models import AppConfig
+from osint_workbench.core.models import AppConfig, InvestigationConfig
 from osint_workbench.core.outcome_memory import OutcomeMemory
 from osint_workbench.core.plan_object import PlanStore
 from osint_workbench.core.quality import QualityPipeline
@@ -82,6 +83,53 @@ def resolve_backend_params(config: AppConfig) -> tuple[str, str, float, str]:
     return base_url, model, temperature, api_key
 
 
+class ModelNotConfiguredError(RuntimeError):
+    """Raised when an investigation can't start because no LLM model is
+    selected for the active backend and none could be safely
+    auto-detected from what's currently loaded there."""
+
+
+def ensure_active_model(base_url: str, model: str, api_key: str) -> Tuple[str, Optional[str]]:
+    """Resolve the model an LLMClient for `base_url` should actually use.
+
+    `model` already set -- returned unchanged, no network call. Watson
+    never re-validates a configured id against list_models(): some
+    OpenAI-compatible backends (hosted APIs in particular) don't
+    exhaustively list every servable model there, so treating "not in
+    the list" as an error would break working setups.
+
+    `model` empty -- Watson no longer ships a hardcoded guess here, so
+    this probes `base_url` for what's currently loaded and auto-selects
+    it when there's exactly one candidate. Zero or multiple candidates
+    (or an unreachable endpoint) can't be resolved safely, so an error
+    naming what IS available is returned instead of guessing wrong.
+
+    Returns (resolved_model, error). When `error` is set, resolved_model
+    is "" and MUST NOT be used to construct or run an LLMClient.
+    """
+    if model:
+        return model, None
+    probe = LLMClient(base_url=base_url, api_key=api_key or "lm-studio").list_models()
+    if probe["error"]:
+        return "", (
+            "No model selected, and the backend couldn't be reached to "
+            f"auto-detect one ({probe['error']}). Start your backend, then "
+            "assign one in Settings \u2192 Assign Model to Backend."
+        )
+    models = probe["models"]
+    if len(models) == 1:
+        return models[0], None
+    if not models:
+        return "", (
+            "No model selected, and none are currently loaded at the "
+            "backend. Load a model, then assign it in Settings \u2192 Assign Model to Backend."
+        )
+    return "", (
+        "No model selected, and multiple are loaded at the backend "
+        f"({', '.join(models)}). Assign one in Settings \u2192 Assign Model to Backend."
+    )
+
+
 def build_engine_from_config(
     config_path: str | None = None,
     reports_dir: str | None = None,
@@ -109,6 +157,9 @@ def build_engine_from_config(
     system_prompt = _load_system_prompt(system_prompt_path)
 
     llm_base_url, llm_model, llm_temperature, llm_api_key = resolve_backend_params(config)
+    llm_model, model_error = ensure_active_model(llm_base_url, llm_model, llm_api_key)
+    if model_error:
+        raise ModelNotConfiguredError(model_error)
     llm_client = LLMClient(
         base_url=llm_base_url,
         model=llm_model,
@@ -155,3 +206,81 @@ def build_engine_from_config(
         outcome_memory=outcome_memory,
     )
     return engine, event_bus, fetcher
+
+
+def build_investigation_config(
+    data: dict,
+    *,
+    require_category: bool = False,
+    default_urgency: str = "normal",
+) -> Tuple[Optional[InvestigationConfig], Optional[str]]:
+    """Parse a POST /api/run request body into an InvestigationConfig, or
+    return (None, error_message) if a required field is missing.
+
+    Shared by gui.py's and osint_workbench/api/routes.py's /api/run
+    handlers -- the two Flask hosts this project ships (see rag_routes.py's
+    docstring for why they can't just share one Blueprint here: both
+    already define their own /api/run and registering a second one would
+    collide). Centralizing target/category/project_id/strategy parsing
+    here means the Projects/Strategy fields can't drift between the two
+    handlers, and a test exercising this function directly is guaranteed
+    to cover exactly what gui.py (the launchers' actual entry point) runs
+    at request-parse time, not just routes.py's separately-tested copy.
+
+    `require_category`/`default_urgency` let each caller keep its own
+    pre-existing validation contract instead of silently changing either
+    handler's user-facing behavior:
+    - gui.py requires an explicit category (no auto-detect fallback) and
+      defaults urgency to "normal OSINT search" -- pass
+      require_category=True, default_urgency="normal OSINT search".
+    - routes.py defaults category to "Auto-Detect" and urgency to
+      "normal" when absent -- pass require_category=False (the default).
+
+    Args:
+        data: The parsed JSON request body.
+        require_category: If True, a missing/blank category is treated as
+            a validation error (matching "Missing target or category").
+            If False, a missing/blank category defaults to "Auto-Detect".
+        default_urgency: Urgency value used when the request omits one.
+
+    Returns:
+        (config, None) on success, or (None, error_message) if target (or,
+        when require_category=True, category) is missing/blank.
+    """
+    target = str(data.get("target", "")).strip()
+    category = str(data.get("category", "")).strip()
+
+    if require_category:
+        if not target or not category:
+            return None, "Missing target or category"
+    else:
+        if not target:
+            return None, "Target is required"
+        if not category:
+            category = "Auto-Detect"
+
+    # Projects feature: optional at this layer (a missing/None project_id
+    # is valid -- the dashboard UI no longer prompts the user to pick one;
+    # it auto-mints a fresh, independent scope per investigation via
+    # ensureInvestigationScope() before /api/run is ever called, so a
+    # caller here without one is the CLI/tests/any non-dashboard caller,
+    # which keeps working via the GLOBAL_SCOPE fallback). `data.get(...)
+    # or ""` guards against an explicit JSON `null` (str(None) == "None",
+    # which is truthy and would silently scope hints under the literal,
+    # unreadable project "None").
+    project_id = str(data.get("project_id") or "").strip() or None
+    strategy = str(data.get("strategy") or "").strip() or DEFAULT_STRATEGY
+    if strategy not in STRATEGIES:
+        strategy = DEFAULT_STRATEGY
+
+    config = InvestigationConfig(
+        target=target,
+        category=category,
+        max_rounds=data.get("max_rounds", "Auto"),
+        urgency=data.get("urgency", default_urgency),
+        lm_studio_url=data.get("lm_studio_url"),
+        enable_pdf=bool(data.get("enable_pdf", False)),
+        project_id=project_id,
+        strategy=strategy,
+    )
+    return config, None

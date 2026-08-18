@@ -9,17 +9,21 @@ Three provenance tiers (TRUST_TIER_WEIGHTS in steering_index.py):
 - ocr_image (0.6): text OCR'd from an uploaded image -- lowest trust since
   OCR itself is error-prone.
 
-All hints are written to SteeringIndex.GLOBAL_SCOPE rather than a specific
-investigation_id. This is deliberate, not an oversight: routes.py mints its
-own investigation_id for `_state["investigation_id"]` at run start, but
+Hints are scoped by `project_id` (Projects feature) rather than a specific
+investigation_id: routes.py mints its own investigation_id for
+`_state["investigation_id"]` at run start, but
 `OSINTEngine.run_investigation` mints a SEPARATE one internally for the
 actual InvestigationState/InvestigationPlan -- the two never match while a
-run is in flight. Scoping hints to "the active investigation_id" would
+run is in flight, so scoping hints to "the active investigation_id" would
 silently write them under an id `_build_replan_prompt` never queries.
-GLOBAL_SCOPE sidesteps that mismatch entirely (same reasoning already
-applied to `source_category` rows) at the cost of hints persisting beyond
-one investigation, which is an acceptable, even useful, tradeoff for
-user-supplied background context.
+project_id sidesteps that mismatch entirely: it's stable and known at
+ingest time, since the dashboard mints one independent scope per
+investigation via ensureInvestigationScope() before the first RAG upload
+or /api/run call -- unlike investigation_id, which isn't assigned until
+the run actually starts and is mismatched as described above -- while
+still keeping one case's hints from leaking into an unrelated one. Falls
+back to SteeringIndex.GLOBAL_SCOPE only for callers that don't supply a
+project_id at all (main.py's CLI, tests).
 
 A thinker-tier LLM call turns the raw extracted text into a small set of
 typed "slots" (concrete facts/leads an investigator would act on) instead
@@ -35,6 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Tuple
 
+from osint_workbench.core import project_store
 from osint_workbench.core.llm_client import LLMClient, LLMClientError
 from osint_workbench.core.steering_index import SteeringIndex
 from osint_workbench.multimedia.extractors.document import DocumentExtractor
@@ -127,11 +132,22 @@ def ingest_context(
     trust_tier: str,
     llm_client: LLMClient,
     steering_index: SteeringIndex,
+    project_id: Optional[str] = None,
     model: Optional[str] = None,
     temperature: Optional[float] = None,
 ) -> IngestResult:
     """Thinker-tag raw context text into hints and write them into
-    steering_index as GLOBAL_SCOPE entry_type='hint' rows.
+    steering_index as entry_type='hint' rows.
+
+    Scoped to `project_id` (Projects feature: RAG hints/clues/aliases
+    are per-case, not global -- see project_store.steering_scope) when
+    provided. Falls back to SteeringIndex.GLOBAL_SCOPE when project_id is
+    None/empty, for callers with no project context (main.py's CLI,
+    direct test construction) -- see module docstring for why GLOBAL_SCOPE
+    used to be the *only* option here and why scoping by project_id (not
+    investigation_id) sidesteps that same id-mismatch problem cleanly:
+    project_id is stable and known at ingest time, unlike the
+    investigation_id OSINTEngine.run_investigation mints internally.
 
     Never raises: LLM/parse failures are captured in IngestResult.error
     with zero slots written, so a bad upload can't take down the caller
@@ -157,6 +173,8 @@ def ingest_context(
     if not isinstance(raw_slots, list):
         return IngestResult(slot_count=0, error="Malformed slot response: 'slots' is not a list")
 
+    scope = project_store.steering_scope(project_id) if project_id else SteeringIndex.GLOBAL_SCOPE
+
     written = []
     for slot in raw_slots:
         if not isinstance(slot, dict):
@@ -166,7 +184,7 @@ def ingest_context(
         if not slot_type or not value:
             continue
         steering_index.add(
-            SteeringIndex.GLOBAL_SCOPE, "hint",
+            scope, "hint",
             fingerprint=f"{slot_type}:{value.lower()}",
             payload=f"{slot_type}: {value}",
             trust_tier=trust_tier,

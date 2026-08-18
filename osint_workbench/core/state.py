@@ -43,8 +43,9 @@ _UPSERT_SQL = """
 INSERT OR REPLACE INTO investigations (
     id, target, category, status, config, state,
     created_at, updated_at, elapsed_seconds, rounds_completed,
-    findings_count, report_md_path, report_html_path, report_pdf_path
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    findings_count, report_md_path, report_html_path, report_pdf_path,
+    project_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _SELECT_BY_ID_SQL = """
@@ -57,8 +58,15 @@ FROM investigations WHERE id = ?
 _LIST_SQL = """
 SELECT id, target, category, status, created_at, updated_at,
        elapsed_seconds, rounds_completed, findings_count,
-       report_md_path, report_html_path, report_pdf_path
+       report_md_path, report_html_path, report_pdf_path, project_id
 FROM investigations ORDER BY created_at DESC LIMIT ?
+"""
+
+_LIST_BY_PROJECT_SQL = """
+SELECT id, target, category, status, created_at, updated_at,
+       elapsed_seconds, rounds_completed, findings_count,
+       report_md_path, report_html_path, report_pdf_path, project_id
+FROM investigations WHERE project_id = ? ORDER BY created_at DESC LIMIT ?
 """
 
 _CLEANUP_SQL = """
@@ -88,6 +96,9 @@ class StateManager:
         self._conn = db.get_connection(self.db_path)
         with db.write_lock(self.db_path):
             self._conn.execute(_CREATE_TABLE_SQL)
+            # Projects feature: investigations predate project_id, so
+            # existing on-disk databases need it added post-hoc.
+            db.ensure_column(self._conn, "investigations", "project_id", "TEXT")
             self._conn.commit()
 
     def save_checkpoint(self, state: InvestigationState) -> None:
@@ -110,6 +121,8 @@ class StateManager:
             "lm_studio_url": state.config.lm_studio_url,
             "enable_multi_engine": state.config.enable_multi_engine,
             "enable_pdf": state.config.enable_pdf,
+            "project_id": state.config.project_id,
+            "strategy": state.config.strategy,
         })
 
         # Serialize state to JSON (findings, round_plans, error)
@@ -142,6 +155,7 @@ class StateManager:
                 None,  # report_md_path - set externally if needed
                 None,  # report_html_path
                 None,  # report_pdf_path
+                state.config.project_id,
             ))
             self._conn.commit()
 
@@ -200,6 +214,8 @@ class StateManager:
             lm_studio_url=config_data.get("lm_studio_url"),
             enable_multi_engine=config_data.get("enable_multi_engine", True),
             enable_pdf=config_data.get("enable_pdf", False),
+            project_id=config_data.get("project_id"),
+            strategy=config_data.get("strategy", "auto"),
         )
 
         # Reconstruct findings dict
@@ -219,11 +235,14 @@ class StateManager:
 
         return investigation_state
 
-    def list_investigations(self, limit: int = 50) -> List[dict]:
+    def list_investigations(self, limit: int = 50, project_id: Optional[str] = None) -> List[dict]:
         """List investigations ordered by created_at descending.
 
         Args:
             limit: Maximum number of records to return. Clamped to range [1, 200].
+            project_id: When set, restricts the list to investigations
+                belonging to this project (Projects feature) instead of
+                every investigation regardless of project.
 
         Returns:
             List of dicts with summary fields (not full state).
@@ -231,13 +250,16 @@ class StateManager:
         # Clamp limit to 1-200
         limit = max(1, min(200, limit))
 
-        rows = self._conn.execute(_LIST_SQL, (limit,)).fetchall()
+        if project_id:
+            rows = self._conn.execute(_LIST_BY_PROJECT_SQL, (project_id, limit)).fetchall()
+        else:
+            rows = self._conn.execute(_LIST_SQL, (limit,)).fetchall()
         results = []
         for row in rows:
             (
                 inv_id, target, category, status, created_at, updated_at,
                 elapsed_seconds, rounds_completed, findings_count,
-                report_md_path, report_html_path, report_pdf_path
+                report_md_path, report_html_path, report_pdf_path, row_project_id
             ) = row
             results.append({
                 "id": inv_id,
@@ -252,6 +274,7 @@ class StateManager:
                 "report_md_path": report_md_path,
                 "report_html_path": report_html_path,
                 "report_pdf_path": report_pdf_path,
+                "project_id": row_project_id,
             })
         return results
 

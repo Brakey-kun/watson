@@ -434,6 +434,13 @@ class KBLesson:
     cumulative_delta: float = 0.0
     created_at: float = field(default_factory=time.time)
     promoted_at: Optional[float] = None
+    # "Skills" UI toggle (Requirement: user can activate/deactivate a
+    # skill without losing its staged/active/demoted promotion history).
+    # A deactivated lesson is excluded from active_lessons() regardless
+    # of stage, but stays in the table -- toggling back on restores it
+    # with its promotion history intact, only delete_lesson() is
+    # permanent.
+    active: bool = True
 
 
 class OutcomeMemory:
@@ -447,6 +454,10 @@ class OutcomeMemory:
             conn.execute(_CREATE_CLAIMS_SQL)
             conn.execute(_CREATE_CLAIMS_INDEX_SQL)
             conn.execute(_CREATE_KB_LESSONS_SQL)
+            # "Skills" UI (Requirement: user-toggleable global lessons):
+            # kb_lessons predates the active flag, so existing on-disk
+            # databases need it added post-hoc -- see db.ensure_column.
+            db.ensure_column(conn, "kb_lessons", "active", "INTEGER NOT NULL DEFAULT 1")
             conn.commit()
 
     @property
@@ -610,19 +621,76 @@ class OutcomeMemory:
     def active_lessons(self, subject_type: str, k: int = 5) -> list[KBLesson]:
         """Return up to k ACTIVE (promoted) lessons for a subject_type,
         highest cumulative_delta first -- the only lessons safe to surface
-        to a thinker-tier replan prompt."""
+        to a thinker-tier replan prompt. Excludes lessons the user has
+        deactivated via the Skills UI even if their stage is 'active'."""
         rows = self._conn.execute(
             "SELECT id, subject_type, action_taken, outcome_quality, round_cost, lesson, "
-            "stage, uses_since_promotion, cumulative_delta, created_at, promoted_at "
-            "FROM kb_lessons WHERE subject_type = ? AND stage = 'active' "
+            "stage, uses_since_promotion, cumulative_delta, created_at, promoted_at, active "
+            "FROM kb_lessons WHERE subject_type = ? AND stage = 'active' AND active = 1 "
             "ORDER BY cumulative_delta DESC LIMIT ?",
             (subject_type, k),
         ).fetchall()
-        return [
-            KBLesson(
-                id=r[0], subject_type=r[1], action_taken=r[2], outcome_quality=r[3],
-                round_cost=r[4], lesson=r[5], stage=LessonStage(r[6]),
-                uses_since_promotion=r[7], cumulative_delta=r[8], created_at=r[9], promoted_at=r[10],
+        return [self._row_to_lesson(r) for r in rows]
+
+    @staticmethod
+    def _row_to_lesson(r) -> KBLesson:
+        return KBLesson(
+            id=r[0], subject_type=r[1], action_taken=r[2], outcome_quality=r[3],
+            round_cost=r[4], lesson=r[5], stage=LessonStage(r[6]),
+            uses_since_promotion=r[7], cumulative_delta=r[8], created_at=r[9],
+            promoted_at=r[10], active=bool(r[11]),
+        )
+
+    # -- Skills (kb_lessons surfaced as user-manageable entries) --------
+
+    def list_all_lessons(self, subject_type: Optional[str] = None) -> list[KBLesson]:
+        """List every lesson regardless of stage/active flag -- feeds the
+        Skills panel, which shows staged/active/demoted and lets the user
+        see + toggle + delete any of them, not just the promoted subset
+        active_lessons() hands to the planner."""
+        if subject_type:
+            rows = self._conn.execute(
+                "SELECT id, subject_type, action_taken, outcome_quality, round_cost, lesson, "
+                "stage, uses_since_promotion, cumulative_delta, created_at, promoted_at, active "
+                "FROM kb_lessons WHERE subject_type = ? "
+                "ORDER BY cumulative_delta DESC",
+                (subject_type,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT id, subject_type, action_taken, outcome_quality, round_cost, lesson, "
+                "stage, uses_since_promotion, cumulative_delta, created_at, promoted_at, active "
+                "FROM kb_lessons ORDER BY cumulative_delta DESC"
+            ).fetchall()
+        return [self._row_to_lesson(r) for r in rows]
+
+    def set_lesson_active(self, lesson_id: str, active: bool) -> Optional[KBLesson]:
+        """Toggle a lesson's active flag. Returns the updated lesson, or
+        None if lesson_id doesn't exist. Deactivating does NOT touch
+        stage/cumulative_delta -- re-activating restores it exactly where
+        its promotion history left off."""
+        conn = self._conn
+        with db.write_lock(self._db_path):
+            cursor = conn.execute(
+                "UPDATE kb_lessons SET active = ? WHERE id = ?", (int(active), lesson_id),
             )
-            for r in rows
-        ]
+            conn.commit()
+            if cursor.rowcount == 0:
+                return None
+        row = conn.execute(
+            "SELECT id, subject_type, action_taken, outcome_quality, round_cost, lesson, "
+            "stage, uses_since_promotion, cumulative_delta, created_at, promoted_at, active "
+            "FROM kb_lessons WHERE id = ?",
+            (lesson_id,),
+        ).fetchone()
+        return self._row_to_lesson(row) if row else None
+
+    def delete_lesson(self, lesson_id: str) -> bool:
+        """Permanently remove a lesson (Requirement: user can delete a
+        skill they've found unhelpful, not just deactivate it). Returns
+        False if lesson_id didn't exist."""
+        conn = self._conn
+        with db.write_lock(self._db_path):
+            cursor = conn.execute("DELETE FROM kb_lessons WHERE id = ?", (lesson_id,))
+            conn.commit()
+            return cursor.rowcount > 0

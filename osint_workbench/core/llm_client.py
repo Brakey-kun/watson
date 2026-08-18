@@ -42,7 +42,7 @@ class LLMClient:
     def __init__(
         self,
         base_url: str = "http://127.0.0.1:1234/v1",
-        model: str = "gemma-4-12b-it-uncensored",
+        model: str = "",
         temperature: float = 0.7,
         max_retries: int = 3,
         system_prompt: str = "",
@@ -68,6 +68,17 @@ class LLMClient:
         self.max_retries = max_retries
         self.default_system_prompt = system_prompt
         self.api_key = api_key or "lm-studio"
+        # True when `model` was auto-detected from list_models() rather
+        # than explicitly chosen (config, wizard, Model Tiers). Callers
+        # that hold this client across multiple runs (routes.py's
+        # singleton) use this to re-probe the endpoint every run instead
+        # of trusting a guess forever -- otherwise a model swapped in the
+        # backend mid-session (e.g. LM Studio's JIT loading silently
+        # serving whatever id is sent) would go undetected exactly like
+        # the hardcoded default this replaces. Explicit assignment
+        # (switch_backend, set_active_model) always clears it back to
+        # False.
+        self.model_autodetected = False
         self._client = OpenAI(base_url=self.base_url, api_key=self.api_key)
 
     def ask(

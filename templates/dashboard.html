@@ -186,8 +186,18 @@
                         <div class="flex justify-between"><span class="text-gray-400">Backend:</span><span id="wizard-summary-backend" class="text-gray-200 font-mono"></span></div>
                         <div class="flex justify-between"><span class="text-gray-400">Endpoint:</span><span id="wizard-summary-endpoint" class="text-gray-200 font-mono text-xs"></span></div>
                         <div class="flex justify-between"><span class="text-gray-400">API Key:</span><span id="wizard-summary-apikey" class="text-gray-200 font-mono"></span></div>
+                        <div class="flex justify-between"><span class="text-gray-400">Model:</span><span id="wizard-summary-model" class="text-gray-200 font-mono text-xs"></span></div>
                         <div class="flex justify-between"><span class="text-gray-400">Status:</span><span class="text-green-400">✓ Connected</span></div>
                     </div>
+                </div>
+            </div>
+            <!-- Danger Zone: full data reset -->
+            <div class="px-8 py-4 border-t border-gray-800" style="background: #1a1720;">
+                <button id="btn-open-reset" onclick="toggleDangerZone()" class="text-xs text-gray-500 hover:text-red-400 transition-colors">Danger Zone &#9662;</button>
+                <div id="danger-zone-body" class="hidden mt-3 space-y-2">
+                    <p class="text-xs text-gray-400">Permanently delete every investigation, project, uploaded hint, claim, plan, and learned skill this app has stored, plus every generated report file. Your LLM backend configuration above (endpoint, API key, model) is NOT affected.</p>
+                    <button id="btn-reset-all-data" onclick="resetAllData()" class="text-xs px-3 py-1.5 rounded-lg border border-red-900 text-red-400 hover:bg-red-950 transition-colors">Reset All Data</button>
+                    <div id="reset-result" class="hidden text-xs rounded-lg p-2"></div>
                 </div>
             </div>
             <!-- Wizard Footer (Navigation) -->
@@ -203,6 +213,19 @@
         </div>
     </div>
 
+    <!-- Strategy Docs Modal -->
+    <div id="strategy-docs-modal" class="fixed inset-0 z-50 hidden items-center justify-center" style="background: rgba(0,0,0,0.75);">
+        <div class="card-bg rounded-2xl shadow-2xl w-full max-w-lg mx-4 relative overflow-hidden" style="max-height: 80vh;">
+            <button onclick="closeStrategyDocsModal()" class="absolute top-4 right-4 text-gray-400 hover:text-white text-xl z-10">&times;</button>
+            <div class="px-8 pt-6 pb-4 border-b border-gray-800">
+                <h2 class="text-xl font-semibold text-[#e88f73]">Research Strategies</h2>
+            </div>
+            <div id="strategy-docs-body" class="px-8 py-6 overflow-y-auto space-y-4" style="max-height: 60vh;">
+                <div class="text-sm text-gray-400">Loading...</div>
+            </div>
+        </div>
+    </div>
+
     <!-- Main Content Area -->
     <div class="flex-1 flex overflow-hidden" id="main-content">
         <!-- Sidebar - Search & History -->
@@ -211,6 +234,13 @@
             <div class="card-bg p-5 rounded-xl flex flex-col space-y-4">
                 <h2 class="text-lg font-semibold text-[#e88f73] border-b border-gray-800 pb-2">New Investigation</h2>
                 
+                <!-- Investigation Name -->
+                <div class="flex flex-col space-y-1">
+                    <label class="text-xs text-gray-400 font-medium">Investigation Name <span class="text-gray-600">(optional — every investigation is its own independent, isolated case; hints and insights never cross into another one)</span></label>
+                    <input id="investigation-name" type="text" placeholder="Auto-named from target if left blank"
+                           class="bg-[#25232a] border border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#b8543a]">
+                </div>
+
                 <!-- Category Select -->
                 <div class="flex flex-col space-y-1">
                     <label class="text-xs text-gray-400 font-medium">OSINT Category</label>
@@ -256,6 +286,17 @@
                     </select>
                 </div>
 
+                <!-- Strategy Select -->
+                <div class="flex flex-col space-y-1">
+                    <div class="flex items-center justify-between">
+                        <label class="text-xs text-gray-400 font-medium">Research Strategy</label>
+                        <button type="button" onclick="openStrategyDocsModal()" title="What do these mean?" class="text-xs text-gray-500 hover:text-[#e88f73] transition-colors">?</button>
+                    </div>
+                    <select id="strategy" class="bg-[#25232a] border border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#b8543a]">
+                        <option value="auto">Auto</option>
+                    </select>
+                </div>
+
                 <!-- Backend Selector -->
                 <div class="flex flex-col space-y-1">
                     <label class="text-xs text-gray-400 font-medium">Backend</label>
@@ -264,6 +305,33 @@
                             <option value="">Loading backends...</option>
                         </select>
                         <span id="backend-status" class="absolute right-8 top-1/2 -translate-y-1/2 text-xs"></span>
+                    </div>
+                </div>
+
+                <!-- VRAM-aware Model Assignment -->
+                <div class="flex flex-col space-y-1">
+                    <button type="button" onclick="toggleModelAssign()" class="flex items-center justify-between text-xs text-gray-400 font-medium hover:text-[#e88f73] transition-colors">
+                        <span>Assign Model to Backend (VRAM-aware)</span>
+                        <span id="model-assign-caret" class="transition-transform">&#9656;</span>
+                    </button>
+                    <div id="model-assign-body" class="hidden flex flex-col space-y-2 pt-1">
+                        <button type="button" onclick="detectVram()" class="text-xs px-3 py-1.5 rounded-lg bg-[#25232a] border border-gray-700 hover:border-[#b8543a] text-gray-300 hover:text-[#e88f73] transition-colors self-start">
+                            Detect GPU VRAM
+                        </button>
+                        <div id="vram-detect-result" class="text-[11px] text-gray-500"></div>
+                        <select id="model-assign-input"
+                               class="bg-[#25232a] border border-gray-700 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:border-[#b8543a] font-mono">
+                            <option value="">(expand to load models)</option>
+                        </select>
+                        <div class="flex items-center space-x-2">
+                            <label class="text-[11px] text-gray-500 whitespace-nowrap">Context length</label>
+                            <input id="model-assign-context" type="number" placeholder="(unchanged)" min="512"
+                                   class="flex-1 bg-[#25232a] border border-gray-700 rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-[#b8543a] font-mono">
+                        </div>
+                        <button type="button" onclick="applyModelAssignment()" class="text-xs px-3 py-1.5 rounded-lg btn-accent self-start">
+                            Apply to Active Backend
+                        </button>
+                        <span id="model-assign-status" class="text-[11px] text-gray-500"></span>
                     </div>
                 </div>
 
@@ -360,7 +428,10 @@
             <div class="card-bg p-5 rounded-xl flex flex-col space-y-3">
                 <div class="flex items-center justify-between border-b border-gray-800 pb-2">
                     <h2 class="text-lg font-semibold text-[#e88f73]">Investigation Insights</h2>
-                    <button onclick="loadInvestigationInsights()" title="Refresh" class="text-xs text-gray-500 hover:text-[#e88f73] transition-colors">&#8635;</button>
+                    <div class="flex items-center space-x-3">
+                        <button id="btn-clear-data" onclick="clearInvestigationData()" title="Delete this investigation's case record and uploaded context hints (run history/claims are kept -- use Settings > Reset to wipe everything)" class="text-xs text-gray-500 hover:text-red-400 transition-colors hidden">Clear Data</button>
+                        <button onclick="loadInvestigationInsights()" title="Refresh" class="text-xs text-gray-500 hover:text-[#e88f73] transition-colors">&#8635;</button>
+                    </div>
                 </div>
 
                 <div>
@@ -380,6 +451,18 @@
                     <div id="insights-claims" class="space-y-1 text-xs">
                         <span class="text-gray-500">No unresolved claims.</span>
                     </div>
+                </div>
+            </div>
+
+            <!-- Skills Panel (staged/active research-strategy lessons) -->
+            <div class="card-bg p-5 rounded-xl flex flex-col space-y-3">
+                <div class="flex items-center justify-between border-b border-gray-800 pb-2">
+                    <h2 class="text-lg font-semibold text-[#e88f73]">Skills</h2>
+                    <button onclick="loadSkills()" title="Refresh" class="text-xs text-gray-500 hover:text-[#e88f73] transition-colors">&#8635;</button>
+                </div>
+                <p class="text-xs text-gray-500">Lessons the AI derived from past investigations' outcomes. Active skills steer future research; staged skills are candidates awaiting more evidence.</p>
+                <div id="skills-list" class="space-y-2 text-xs max-h-64 overflow-y-auto">
+                    <span class="text-gray-500">No skills recorded yet.</span>
                 </div>
             </div>
         </aside>
@@ -513,77 +596,75 @@
         }
 
         function startInvestigation() {
-            // Declare all variables at the top
             const btn = document.getElementById('btn-run');
             const status = document.getElementById('run-status');
             const target = document.getElementById('target').value.trim();
             const category = document.getElementById('category').value;
             const max_rounds = document.getElementById('max_rounds').value;
             const urgency = document.getElementById('urgency').value;
+            const strategy = document.getElementById('strategy').value || 'auto';
 
             if (!target) {
                 alert('Please enter a target!');
                 return;
             }
 
-            // Disable button and set status before request
+            // Disable immediately to prevent double-submit while the
+            // investigation's independent scope is being minted.
             btn.disabled = true;
-            btn.innerText = 'AI Researching...';
-            document.getElementById('btn-stop').classList.remove('hidden');
-            status.innerText = 'Active';
-            status.className = 'text-xs px-2 py-0.5 rounded bg-red-950 text-red-400 animate-pulse';
+            document.getElementById('btn-clear-data').disabled = true;
+            btn.innerText = 'Starting...';
 
-            // Clear previous logs
-            document.getElementById('logs').innerHTML = '';
+            // Every investigation gets its own independent, isolated scope
+            // (Requirement: insights/hints must never leak into an
+            // investigation that doesn't concern them). Reuses whatever
+            // scope a prior RAG upload in this same pending cycle already
+            // minted (ensureInvestigationScope caches it); mints a fresh
+            // one otherwise.
+            ensureInvestigationScope().then(project_id => {
+                btn.innerText = 'AI Researching...';
+                document.getElementById('btn-stop').classList.remove('hidden');
+                status.innerText = 'Active';
+                status.className = 'text-xs px-2 py-0.5 rounded bg-red-950 text-red-400 animate-pulse';
 
-            // Single POST to /api/run
-            fetch('/api/run', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ category, target, max_rounds, urgency })
-            })
-            .then(res => res.json())
-            .then(data => {
-                if (!data.success) {
-                    throw new Error(data.error || 'Failed to start investigation');
-                }
+                // Clear previous logs
+                document.getElementById('logs').innerHTML = '';
 
-                // Clear any existing intervals before creating new ones
-                if (statusInterval) clearInterval(statusInterval);
-                if (logsInterval) clearInterval(logsInterval);
+                // Single POST to /api/run
+                return fetch('/api/run', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ category, target, max_rounds, urgency, project_id, strategy })
+                })
+                .then(res => res.json())
+                .then(data => {
+                    if (!data.success) {
+                        throw new Error(data.error || 'Failed to start investigation');
+                    }
 
-                // Create polling intervals ONLY after successful /api/run response
-                logsInterval = setInterval(fetchLogs, 1000);
+                    // Clear any existing intervals before creating new ones
+                    if (statusInterval) clearInterval(statusInterval);
+                    if (logsInterval) clearInterval(logsInterval);
 
-                statusInterval = setInterval(() => {
-                    fetch('/api/status')
-                        .then(res => res.json())
-                        .then(s => {
-                            if (!s.is_running) {
-                                // On completion: clear intervals, final log fetch, re-enable button, set "Done", reload history
-                                clearInterval(statusInterval);
-                                clearInterval(logsInterval);
-                                statusInterval = null;
-                                logsInterval = null;
-                                fetchLogs(); // Final log pull
+                    // Create polling intervals ONLY after successful /api/run response
+                    logsInterval = setInterval(fetchLogs, 1000);
 
-                                btn.disabled = false;
-                                btn.innerText = 'Start AI Investigation';
-                                document.getElementById('btn-stop').classList.add('hidden');
-                                document.getElementById('btn-stop').disabled = false;
-                                document.getElementById('btn-stop').innerText = 'Stop Investigation';
-                                status.innerText = 'Done';
-                                status.className = 'text-xs px-2 py-0.5 rounded bg-green-950 text-green-400';
+                    statusInterval = setInterval(() => {
+                        fetch('/api/status')
+                            .then(res => res.json())
+                            .then(s => {
+                                if (!s.is_running) {
+                                    clearInterval(statusInterval);
+                                    clearInterval(logsInterval);
+                                    statusInterval = null;
+                                    logsInterval = null;
+                                    fetchLogs(); // Final log pull
 
-                                loadHistory();
-                                if (s.exists) {
-                                    viewReport(s.report_filename);
-                                } else {
-                                    alert('AI Investigation finished, but no report file was generated.');
+                                    finishInvestigationUI(s, true);
                                 }
-                            }
-                        });
-                }, 2000);
+                            });
+                    }, 2000);
+                });
             })
             .catch(err => {
                 // On error: clear intervals, re-enable button, set "Error", show alert
@@ -592,6 +673,7 @@
                 statusInterval = null;
                 logsInterval = null;
                 btn.disabled = false;
+                document.getElementById('btn-clear-data').disabled = false;
                 btn.innerText = 'Start AI Investigation';
                 document.getElementById('btn-stop').classList.add('hidden');
                 document.getElementById('btn-stop').disabled = false;
@@ -692,6 +774,20 @@
             fetch('/api/status')
                 .then(res => res.json())
                 .then(data => {
+                    // The insights panel should keep showing the last known
+                    // investigation's own scope even after it finished (a
+                    // reload must not fall back to reading GLOBAL_SCOPE,
+                    // which still holds every pre-Investigation-scoping
+                    // hint and any CLI/no-project_id upload -- exactly the
+                    // cross-investigation leak this feature exists to
+                    // prevent). Only the LAUNCH scope (currentInvestigationId)
+                    // stays gated on is_running below, so a finished run's
+                    // scope is never reused by the next upload/start.
+                    if (data.project_id) {
+                        insightsScopeId = data.project_id;
+                        loadInvestigationInsights();
+                    }
+
                     if (data.is_running) {
                         // Restore form fields
                         if (data.target) document.getElementById('target').value = data.target;
@@ -705,10 +801,23 @@
                             }
                         }
 
+                        if (data.project_id) {
+                            currentInvestigationId = data.project_id;
+                            fetch('/api/projects/' + encodeURIComponent(data.project_id))
+                                .then(res => res.json())
+                                .then(p => {
+                                    if (p.success && p.project) {
+                                        document.getElementById('investigation-name').value = p.project.name;
+                                    }
+                                })
+                                .catch(() => {});
+                        }
+
                         // Set UI to active state
                         const btn = document.getElementById('btn-run');
                         const status = document.getElementById('run-status');
                         btn.disabled = true;
+                        document.getElementById('btn-clear-data').disabled = true;
                         btn.innerText = 'AI Researching...';
                         document.getElementById('btn-stop').classList.remove('hidden');
                         status.innerText = 'Active';
@@ -734,18 +843,7 @@
                                         logsInterval = null;
                                         fetchLogs();
 
-                                        btn.disabled = false;
-                                        btn.innerText = 'Start AI Investigation';
-                                        document.getElementById('btn-stop').classList.add('hidden');
-                                        document.getElementById('btn-stop').disabled = false;
-                                        document.getElementById('btn-stop').innerText = 'Stop Investigation';
-                                        status.innerText = 'Done';
-                                        status.className = 'text-xs px-2 py-0.5 rounded bg-green-950 text-green-400';
-
-                                        loadHistory();
-                                        if (s.exists) {
-                                            viewReport(s.report_filename);
-                                        }
+                                        finishInvestigationUI(s, false);
                                     }
                                 });
                         }, 2000);
@@ -927,6 +1025,7 @@
         let wizardRetryCount = 0;
         let wizardActive = false;
         let wizardTestPassed = false;
+        let wizardDetectedModels = [];
         const WIZARD_MAX_RETRIES = 5;
 
         // Session storage for wizard entries (retained on close without completing)
@@ -935,6 +1034,62 @@
             endpoint: 'http://127.0.0.1:1234/v1',
             apiKey: 'lm-studio'
         };
+
+        // --- Danger Zone: full data reset (Settings > Reset All Data) ---
+        function toggleDangerZone() {
+            document.getElementById('danger-zone-body').classList.toggle('hidden');
+        }
+        function resetAllData() {
+            const typed = prompt(
+                'This permanently deletes EVERY investigation, project, uploaded hint, claim, ' +
+                'plan, and learned skill, plus every generated report file. Your LLM backend ' +
+                'configuration (endpoint, API key, model) is kept.\n\n' +
+                'This cannot be undone. Type RESET to confirm:'
+            );
+            if (typed !== 'RESET') return;
+
+            const btn = document.getElementById('btn-reset-all-data');
+            const result = document.getElementById('reset-result');
+            btn.disabled = true;
+            btn.innerText = 'Resetting...';
+            result.classList.add('hidden');
+
+            fetch('/api/reset-all-data', { method: 'POST' })
+                .then(res => res.json())
+                .then(data => {
+                    btn.disabled = false;
+                    btn.innerText = 'Reset All Data';
+                    result.classList.remove('hidden');
+                    if (!data.success) {
+                        result.className = 'text-xs rounded-lg p-2 bg-red-950 text-red-400';
+                        result.innerText = 'Failed: ' + (data.error || 'unknown error');
+                        return;
+                    }
+                    result.className = 'text-xs rounded-lg p-2 bg-green-950 text-green-400';
+                    const tableCount = Object.keys(data.cleared || {}).length;
+                    result.innerText = 'Done. Cleared ' + tableCount + ' table(s), deleted ' +
+                        data.reports_deleted + ' report file(s).' +
+                        (data.reports_failed && data.reports_failed.length
+                            ? ' (' + data.reports_failed.length + ' report file(s) could not be deleted.)'
+                            : '');
+
+                    // Local UI state referenced data that's now gone --
+                    // clear it so nothing stale lingers in the dashboard.
+                    insightsScopeId = null;
+                    currentInvestigationId = null;
+                    scopePromise = null;
+                    document.getElementById('investigation-name').value = '';
+                    loadInvestigationInsights();
+                    loadHistory();
+                })
+                .catch(err => {
+                    btn.disabled = false;
+                    btn.innerText = 'Reset All Data';
+                    result.classList.remove('hidden');
+                    result.className = 'text-xs rounded-lg p-2 bg-red-950 text-red-400';
+                    result.innerText = 'Network error: ' + err.message;
+                });
+        }
 
         // --- Settings Wizard Launcher (re-launch from header gear button) ---
         function openSettingsWizard() {
@@ -1113,6 +1268,9 @@
                 document.getElementById('wizard-summary-backend').textContent = selectedBackend === 'lm_studio' ? 'LM Studio (Local)' : 'Antigravity API (Cloud)';
                 document.getElementById('wizard-summary-endpoint').textContent = endpoint;
                 document.getElementById('wizard-summary-apikey').textContent = apiKey ? (apiKey.substring(0, 4) + '***') : '(none)';
+                document.getElementById('wizard-summary-model').textContent = wizardDetectedModels.length === 1
+                    ? wizardDetectedModels[0]
+                    : 'not set \u2014 assign one in Settings \u2192 Assign Model to Backend after setup';
             }
         }
 
@@ -1151,6 +1309,7 @@
                 saveWizardSessionEntries();
                 wizardStep--;
                 wizardTestPassed = false;
+                wizardDetectedModels = [];
                 renderWizardStep();
             }
         }
@@ -1168,6 +1327,7 @@
             document.getElementById('wizard-test-spinner').classList.remove('hidden');
             document.getElementById('wizard-test-btn').disabled = true;
             document.getElementById('wizard-test-result').classList.add('hidden');
+            wizardDetectedModels = [];
 
             fetch('/api/test-connection', {
                 method: 'POST',
@@ -1185,6 +1345,7 @@
                 if (data.success) {
                     wizardTestPassed = true;
                     wizardRetryCount = 0;
+                    wizardDetectedModels = data.models_available || [];
                     resultDiv.className = 'text-sm rounded-lg p-3 bg-green-950 text-green-300 border border-green-800';
                     resultDiv.innerHTML = '✓ Connection successful!' + (data.models_available && data.models_available.length > 0 ? '<br><span class="text-xs text-gray-400">Models: ' + data.models_available.slice(0, 3).join(', ') + '</span>' : '');
                     // Show next button
@@ -1251,7 +1412,7 @@
             configPayload.backends[selectedBackend] = {
                 endpoint: endpoint,
                 api_key: apiKey,
-                model: selectedBackend === 'lm_studio' ? 'gemma-4-12b-it-uncensored' : 'antigravity-large',
+                model: wizardDetectedModels.length === 1 ? wizardDetectedModels[0] : '',
                 temperature: 0.7
             };
 
@@ -1444,37 +1605,42 @@
             while (list.children.length > 8) list.removeChild(list.lastChild);
         }
         function ragUploadFile(file) {
-            const formData = new FormData();
-            formData.append('file', file);
-            formData.append('target', document.getElementById('target').value.trim());
             ragAppendStatus('Uploading "' + file.name + '"...', 'info');
-            fetch('/api/upload-context', { method: 'POST', body: formData })
-                .then(res => res.json())
-                .then(data => {
-                    // Extraction + tagging runs in the background; the real
-                    // outcome (hint count or error) arrives via the
-                    // extraction_complete/extraction_failed socket events below.
-                    if (!data.success) ragAppendStatus(file.name + ': ' + (data.error || 'upload failed'), 'error');
-                })
-                .catch(err => ragAppendStatus(file.name + ': network error - ' + err.message, 'error'));
+            ensureInvestigationScope().then(project_id => {
+                const formData = new FormData();
+                formData.append('file', file);
+                formData.append('target', document.getElementById('target').value.trim());
+                formData.append('project_id', project_id);
+                return fetch('/api/upload-context', { method: 'POST', body: formData })
+                    .then(res => res.json())
+                    .then(data => {
+                        // Extraction + tagging runs in the background; the real
+                        // outcome (hint count or error) arrives via the
+                        // extraction_complete/extraction_failed socket events below.
+                        if (!data.success) ragAppendStatus(file.name + ': ' + (data.error || 'upload failed'), 'error');
+                    });
+            })
+            .catch(err => ragAppendStatus(file.name + ': network error - ' + err.message, 'error'));
         }
         function ragSubmitSnippet() {
             const textarea = document.getElementById('rag-snippet-input');
             const text = textarea.value.trim();
             if (!text) return;
             ragAppendStatus('Adding note...', 'info');
-            fetch('/api/upload-context', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text, target: document.getElementById('target').value.trim() })
-            })
-            .then(res => res.json())
-            .then(data => {
-                if (!data.success) {
-                    ragAppendStatus('Note: ' + (data.error || 'ingest failed'), 'error');
-                    return;
-                }
-                textarea.value = '';
+            ensureInvestigationScope().then(project_id => {
+                return fetch('/api/upload-context', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text, target: document.getElementById('target').value.trim(), project_id })
+                })
+                .then(res => res.json())
+                .then(data => {
+                    if (!data.success) {
+                        ragAppendStatus('Note: ' + (data.error || 'ingest failed'), 'error');
+                        return;
+                    }
+                    textarea.value = '';
+                });
             })
             .catch(err => ragAppendStatus('Note: network error - ' + err.message, 'error'));
         }
@@ -1561,7 +1727,23 @@
             ).join('');
         }
         function loadInvestigationInsights() {
-            fetch('/api/investigation-insights')
+            document.getElementById('btn-clear-data').classList.toggle('hidden', !insightsScopeId);
+            if (!insightsScopeId) {
+                // The panel is scope-specific -- "no scope" (e.g. right
+                // after Clear Data, or before any investigation has ever
+                // run) must mean "nothing to show", not a query-less
+                // request that falls back to reading GLOBAL_SCOPE. That
+                // fallback exists ONLY for callers that never had a
+                // project_id to begin with (main.py's CLI) -- reusing it
+                // here would re-surface every pre-Projects/no-project_id
+                // hint in this panel, exactly the cross-investigation
+                // leak scoping by project_id exists to prevent.
+                renderInsightsPlan(null);
+                renderInsightsHints([]);
+                renderInsightsClaims([]);
+                return;
+            }
+            fetch('/api/investigation-insights?project_id=' + encodeURIComponent(insightsScopeId))
                 .then(res => res.json())
                 .then(data => {
                     if (!data.success) return;
@@ -1572,6 +1754,298 @@
                 .catch(err => console.error('Failed to load investigation insights:', err));
         }
         socket.on('plan_updated', function() { loadInvestigationInsights(); });
+        function clearInvestigationData() {
+            if (!insightsScopeId) return;
+            if (!confirm(
+                "Delete this investigation's case record and uploaded context hints?\n\n" +
+                "Its run history and claims are NOT affected by this -- use Settings > Reset " +
+                "to wipe everything instead. This cannot be undone."
+            )) return;
+
+            const target = insightsScopeId;
+            fetch('/api/projects/' + encodeURIComponent(target), { method: 'DELETE' })
+                .then(res => res.json())
+                .then(data => {
+                    if (!data.success) {
+                        alert('Failed to clear data: ' + (data.error || 'unknown error'));
+                        return;
+                    }
+                    insightsScopeId = null;
+                    // The investigation just cleared can't be resumed into --
+                    // release the launch scope too so the next Start/upload
+                    // mints a genuinely fresh one instead of writing back
+                    // into a project_id project_store no longer has a row for.
+                    if (currentInvestigationId === target) {
+                        currentInvestigationId = null;
+                        scopePromise = null;
+                        document.getElementById('investigation-name').value = '';
+                    }
+                    loadInvestigationInsights();
+                })
+                .catch(err => alert('Network error clearing data: ' + err.message));
+        }
+
+        // --- Investigation scoping (each investigation is its own
+        // independent, isolated case -- see engine.py's
+        // _format_hint_context and rag_routes.py's investigation_insights
+        // for the exclusive-read contract this scope id feeds) ---
+        let currentInvestigationId = null;
+        let insightsScopeId = null;
+        let scopePromise = null;
+        function ensureInvestigationScope() {
+            if (currentInvestigationId) return Promise.resolve(currentInvestigationId);
+            if (scopePromise) return scopePromise;
+            const nameInput = document.getElementById('investigation-name');
+            const target = document.getElementById('target').value.trim();
+            const name = nameInput.value.trim() || (target ? ('Investigation: ' + target) : ('Investigation ' + new Date().toLocaleString()));
+            scopePromise = fetch('/api/projects', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (!data.success) throw new Error(data.error || 'Failed to create investigation scope');
+                currentInvestigationId = data.project.id;
+                insightsScopeId = data.project.id;
+                nameInput.value = data.project.name;
+                return currentInvestigationId;
+            })
+            .finally(() => { scopePromise = null; });
+            return scopePromise;
+        }
+        function finishInvestigationUI(s, alertOnMissingReport) {
+            const btn = document.getElementById('btn-run');
+            const status = document.getElementById('run-status');
+            btn.disabled = false;
+            document.getElementById('btn-clear-data').disabled = false;
+            btn.innerText = 'Start AI Investigation';
+            document.getElementById('btn-stop').classList.add('hidden');
+            document.getElementById('btn-stop').disabled = false;
+            document.getElementById('btn-stop').innerText = 'Stop Investigation';
+            status.innerText = 'Done';
+            status.className = 'text-xs px-2 py-0.5 rounded bg-green-950 text-green-400';
+
+            // The NEXT "Start" click (or RAG upload) begins a genuinely new,
+            // independent investigation -- release the launch scope so it
+            // doesn't inherit this one's. insightsScopeId is left alone so
+            // the panel keeps showing what THIS investigation just found
+            // until a new one actually starts.
+            currentInvestigationId = null;
+            scopePromise = null;
+            document.getElementById('investigation-name').value = '';
+
+            loadHistory();
+            if (s.exists) {
+                viewReport(s.report_filename);
+            } else if (alertOnMissingReport) {
+                alert('AI Investigation finished, but no report file was generated.');
+            }
+        }
+
+        // --- Research Strategy selector + docs modal (/api/strategies) ---
+        let strategyDescriptions = {};
+        function loadStrategies() {
+            fetch('/api/strategies')
+                .then(res => res.json())
+                .then(data => {
+                    if (!data.success) return;
+                    strategyDescriptions = data.strategies || {};
+                    const select = document.getElementById('strategy');
+                    const previousValue = select.value || data.default || 'auto';
+                    select.innerHTML = '';
+                    Object.keys(strategyDescriptions).forEach(key => {
+                        const opt = document.createElement('option');
+                        opt.value = key;
+                        opt.textContent = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                        select.appendChild(opt);
+                    });
+                    select.value = previousValue;
+                })
+                .catch(err => console.error('Failed to load strategies:', err));
+        }
+        function openStrategyDocsModal() {
+            const body = document.getElementById('strategy-docs-body');
+            const entries = Object.entries(strategyDescriptions);
+            body.innerHTML = entries.length
+                ? entries.map(([key, desc]) =>
+                    '<div><h3 class="text-sm font-semibold text-[#e88f73] mb-1">' + escapeHtml(key) + '</h3>' +
+                    '<p class="text-xs text-gray-400">' + escapeHtml(desc) + '</p></div>'
+                  ).join('')
+                : '<div class="text-sm text-gray-400">Strategies unavailable.</div>';
+            document.getElementById('strategy-docs-modal').classList.remove('hidden');
+            document.getElementById('strategy-docs-modal').classList.add('flex');
+        }
+        function closeStrategyDocsModal() {
+            document.getElementById('strategy-docs-modal').classList.add('hidden');
+            document.getElementById('strategy-docs-modal').classList.remove('flex');
+        }
+
+        // --- VRAM-aware model assignment (/api/detect-vram, /api/set-active-model) ---
+        function toggleModelAssign() {
+            const body = document.getElementById('model-assign-body');
+            const caret = document.getElementById('model-assign-caret');
+            const isHidden = body.classList.contains('hidden');
+            body.classList.toggle('hidden');
+            caret.innerHTML = isHidden ? '&#9662;' : '&#9656;';
+            if (isHidden) populateModelAssignSelect();
+        }
+        function populateModelAssignSelect() {
+            const select = document.getElementById('model-assign-input');
+            select.innerHTML = '<option value="">Loading models...</option>';
+            fetch('/api/get-config')
+                .then(res => res.json())
+                .then(configData => {
+                    const activeBackend = configData.llm ? configData.llm.backend : '';
+                    const activeModel = configData.llm ? configData.llm.model : '';
+                    fetch('/api/list-models?backend=' + encodeURIComponent(activeBackend))
+                        .then(res => res.json())
+                        .then(modelsData => {
+                            const models = (modelsData.success && modelsData.models) ? modelsData.models : [];
+                            select.innerHTML = '';
+                            models.forEach(m => {
+                                const opt = document.createElement('option');
+                                opt.value = m;
+                                opt.innerText = m;
+                                select.appendChild(opt);
+                            });
+                            if (activeModel && !models.includes(activeModel)) {
+                                const opt = document.createElement('option');
+                                opt.value = activeModel;
+                                opt.innerText = activeModel + ' (not currently loaded)';
+                                select.appendChild(opt);
+                            }
+                            if (select.options.length === 0) {
+                                const opt = document.createElement('option');
+                                opt.value = '';
+                                opt.disabled = true;
+                                opt.innerText = 'No models available at this backend';
+                                select.appendChild(opt);
+                            }
+                            select.value = activeModel || (models.length ? models[0] : '');
+                        })
+                        .catch(err => {
+                            console.error('Failed to list models for assignment select:', err);
+                            select.innerHTML = '<option value="">Failed to load models</option>';
+                        });
+                })
+                .catch(err => {
+                    console.error('Failed to load config for assignment select:', err);
+                    select.innerHTML = '<option value="">Failed to load config</option>';
+                });
+        }
+        function detectVram() {
+            const result = document.getElementById('vram-detect-result');
+            result.textContent = 'Detecting...';
+            fetch('/api/detect-vram')
+                .then(res => res.json())
+                .then(data => {
+                    if (!data.success) {
+                        result.textContent = 'Detection failed.';
+                        return;
+                    }
+                    if (data.detected) {
+                        result.textContent = data.vram_gb + ' GB VRAM detected (' + data.source + ') — suggested context length ' + data.proposed_context_length;
+                        document.getElementById('model-assign-context').value = data.proposed_context_length;
+                    } else {
+                        result.textContent = 'Could not detect GPU VRAM (' + data.source + ').';
+                    }
+                })
+                .catch(err => {
+                    result.textContent = 'Network error: ' + err.message;
+                });
+        }
+        function applyModelAssignment() {
+            const status = document.getElementById('model-assign-status');
+            const model = document.getElementById('model-assign-input').value.trim();
+            const contextRaw = document.getElementById('model-assign-context').value;
+            if (!model) {
+                status.textContent = 'Select a model first.';
+                status.className = 'text-[11px] text-red-400';
+                return;
+            }
+            const payload = { model };
+            if (contextRaw) payload.context_length = parseInt(contextRaw, 10);
+
+            status.textContent = 'Saving...';
+            status.className = 'text-[11px] text-gray-500';
+            fetch('/api/set-active-model', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (!data.success) {
+                    status.textContent = 'Error: ' + (data.error || 'failed to save');
+                    status.className = 'text-[11px] text-red-400';
+                    return;
+                }
+                status.textContent = 'Saved -> ' + data.model + (data.max_context_tokens ? ' (' + data.max_context_tokens + ' ctx)' : '');
+                status.className = 'text-[11px] text-green-400';
+                loadBackendConfig();
+            })
+            .catch(err => {
+                status.textContent = 'Network error: ' + err.message;
+                status.className = 'text-[11px] text-red-400';
+            });
+        }
+
+        // --- Skills (kb_lessons) panel (/api/skills) ---
+        function renderSkillItem(skill) {
+            const stageColor = skill.stage === 'active' ? 'text-green-400' : (skill.stage === 'demoted' ? 'text-gray-600' : 'text-gray-400');
+            const div = document.createElement('div');
+            div.className = 'p-2 bg-[#25232a] rounded-lg border border-gray-800 flex flex-col space-y-1';
+            div.innerHTML =
+                '<div class="flex items-start justify-between gap-2">' +
+                    '<span class="text-gray-300 flex-1">' + escapeHtml(skill.lesson) + '</span>' +
+                    '<span class="text-[10px] uppercase ' + stageColor + ' whitespace-nowrap">' + escapeHtml(skill.stage) + '</span>' +
+                '</div>' +
+                '<div class="flex items-center justify-between text-[11px] text-gray-500">' +
+                    '<label class="flex items-center space-x-1 cursor-pointer">' +
+                        '<input type="checkbox" ' + (skill.active ? 'checked' : '') + ' class="accent-[#b8543a]">' +
+                        '<span>Active</span>' +
+                    '</label>' +
+                    '<button class="text-red-400 hover:text-red-300">Delete</button>' +
+                '</div>';
+            div.querySelector('input[type=checkbox]').addEventListener('change', e => toggleSkillActive(skill.id, e.target.checked));
+            div.querySelector('button').addEventListener('click', () => deleteSkillById(skill.id));
+            return div;
+        }
+        function loadSkills() {
+            fetch('/api/skills')
+                .then(res => res.json())
+                .then(data => {
+                    const list = document.getElementById('skills-list');
+                    const skills = (data.success && data.skills) ? data.skills : [];
+                    if (skills.length === 0) {
+                        list.innerHTML = '<span class="text-gray-500">No skills recorded yet.</span>';
+                        return;
+                    }
+                    list.innerHTML = '';
+                    skills.forEach(skill => list.appendChild(renderSkillItem(skill)));
+                })
+                .catch(err => console.error('Failed to load skills:', err));
+        }
+        function toggleSkillActive(lessonId, active) {
+            fetch('/api/skills/' + encodeURIComponent(lessonId) + '/toggle', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ active })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (!data.success) loadSkills(); // resync checkbox state on failure
+            })
+            .catch(() => loadSkills());
+        }
+        function deleteSkillById(lessonId) {
+            if (!confirm('Delete this skill permanently?')) return;
+            fetch('/api/skills/' + encodeURIComponent(lessonId), { method: 'DELETE' })
+                .then(res => res.json())
+                .then(() => loadSkills())
+                .catch(err => alert('Failed to delete skill: ' + err.message));
+        }
 
         // Initialize Page
         loadHistory();
@@ -1579,6 +2053,8 @@
         loadBackendConfig();
         checkSetupWizard();
         loadInvestigationInsights();
+        loadStrategies();
+        loadSkills();
         setInterval(loadInvestigationInsights, 5000);
     </script>
 

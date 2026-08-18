@@ -14,8 +14,12 @@ from typing import Tuple
 from flask import Flask, jsonify
 from flask_socketio import SocketIO
 
+from osint_workbench.api.admin_routes import create_admin_blueprint
+from osint_workbench.api.model_routes import create_model_blueprint
+from osint_workbench.api.project_routes import create_project_blueprint
 from osint_workbench.api.rag_routes import create_rag_blueprint
 from osint_workbench.api.routes import create_api_blueprint
+from osint_workbench.api.skills_routes import create_skills_blueprint
 from osint_workbench.core import paths
 from osint_workbench.core.config import ConfigLoader, ConfigurationError
 from osint_workbench.core.engine import OSINTEngine
@@ -25,6 +29,7 @@ from osint_workbench.core.llm_client import LLMClient
 from osint_workbench.core.models import AppConfig
 from osint_workbench.core.outcome_memory import OutcomeMemory
 from osint_workbench.core.plan_object import PlanStore
+from osint_workbench.core.project_store import ProjectStore
 from osint_workbench.core.quality import QualityPipeline
 from osint_workbench.core.search_engines import MultiEngineSearch
 from osint_workbench.core.state import StateManager
@@ -98,11 +103,13 @@ def create_app(config_path: str | None = None) -> Tuple[Flask, SocketIO]:
     steering_index = SteeringIndex()
     plan_store = PlanStore()
     outcome_memory = OutcomeMemory()
+    project_store = ProjectStore()
 
     # Store on app for access by API endpoints (RAG ingest + visibility panel)
     app.config["STEERING_INDEX"] = steering_index
     app.config["PLAN_STORE"] = plan_store
     app.config["OUTCOME_MEMORY"] = outcome_memory
+    app.config["PROJECT_STORE"] = project_store
 
     # 3. LLMClient (depends on config)
     llm_base_url, llm_model, llm_temperature, llm_api_key = resolve_backend_params(config)
@@ -178,6 +185,25 @@ def create_app(config_path: str | None = None) -> Tuple[Flask, SocketIO]:
         get_investigation_id=api_blueprint.get_current_investigation_id,
     )
     app.register_blueprint(rag_blueprint)
+
+    # --- Register model-selector / project CRUD / skills / admin blueprints ---
+    # Same narrow-Blueprint convention as rag_blueprint: registered by both
+    # Flask hosts (this factory and the legacy gui.py dashboard), reading
+    # their dependencies from current_app.config at request time.
+    app.register_blueprint(create_model_blueprint())
+    app.register_blueprint(create_project_blueprint(get_active_project_id=api_blueprint.get_active_project_id))
+    app.register_blueprint(create_skills_blueprint())
+    # This host has no same-origin/CSRF mechanism of its own yet (see
+    # admin_routes.py's docstring) -- reset is still guarded by the SAME
+    # is_running lock every other run-guarded route here shares, just not
+    # by an Origin check, matching this host's existing routes' lack of
+    # one rather than introducing a one-off exception.
+    app.register_blueprint(create_admin_blueprint(
+        run_lock=api_blueprint.run_lock,
+        get_is_running=api_blueprint.get_is_running,
+        check_origin=lambda: True,
+        on_reset=api_blueprint.reset_state,
+    ))
 
     # --- Set up shutdown hook ---
     atexit.register(fetcher.close)

@@ -130,24 +130,28 @@ sys.excepthook = _import_failure_excepthook
 from flask import Flask, jsonify, render_template, request, send_from_directory
 from flask_socketio import SocketIO
 
+from osint_workbench.api.admin_routes import create_admin_blueprint
+from osint_workbench.api.model_routes import create_model_blueprint
+from osint_workbench.api.project_routes import create_project_blueprint
 from osint_workbench.api.rag_routes import create_rag_blueprint
+from osint_workbench.api.skills_routes import create_skills_blueprint
 
 # Engine components used by /api/run - see _build_engine_from_config().
 # Heavier construction-only imports (OSINTEngine, ConcurrentFetcher, etc.)
 # are imported locally inside that function to keep this module's import
 # footprint narrow for routes that don't need them.
 from osint_workbench.core.events import Event, EventBus, EventType
-from osint_workbench.core.models import InvestigationConfig
 from osint_workbench.core.outcome_memory import OutcomeMemory
 from osint_workbench.core.plan_object import PlanStore
+from osint_workbench.core.project_store import ProjectStore
 from osint_workbench.core.steering_index import SteeringIndex
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
-# Persistent EventBus + steering/plan/outcome-memory singletons, shared
-# across every /api/run call (unlike LLMClient/engine, which are rebuilt
-# fresh per run so config.json edits apply immediately -- see
+# Persistent EventBus + steering/plan/outcome-memory/project singletons,
+# shared across every /api/run call (unlike LLMClient/engine, which are
+# rebuilt fresh per run so config.json edits apply immediately -- see
 # _build_engine_from_config()). These are cheap SQLite-table wrappers with
 # no backend/model dependency, and the RAG ingest UI (drag-drop box,
 # investigation insights panel) needs to reach them even when no
@@ -156,9 +160,11 @@ _gui_event_bus = EventBus()
 _steering_index = SteeringIndex()
 _plan_store = PlanStore()
 _outcome_memory = OutcomeMemory()
+_project_store = ProjectStore()
 app.config["STEERING_INDEX"] = _steering_index
 app.config["PLAN_STORE"] = _plan_store
 app.config["OUTCOME_MEMORY"] = _outcome_memory
+app.config["PROJECT_STORE"] = _project_store
 
 
 def _get_current_investigation_id() -> str:
@@ -173,20 +179,32 @@ _rag_blueprint = create_rag_blueprint(
     event_bus=_gui_event_bus,
     get_investigation_id=_get_current_investigation_id,
 )
+_model_blueprint = create_model_blueprint()
+# is_running/last_run_project_id are defined further down (see "Global
+# state tracking" below) -- safe as a deferred lambda since this closure
+# is only called at request time, well after module load finishes.
+_project_blueprint = create_project_blueprint(
+    get_active_project_id=lambda: (last_run_project_id if is_running else None),
+)
+_skills_blueprint = create_skills_blueprint()
 
 
-@_rag_blueprint.before_request
-def _refresh_rag_config():
-    """Rebuild APP_CONFIG/LLM_CLIENT fresh from config.json before every
-    RAG-blueprint request, matching this module's "config changes apply on
-    the very next call, no restart" philosophy (see
-    _build_engine_from_config())."""
+def _refresh_request_scoped_config():
+    """Rebuild CONFIG_LOADER/APP_CONFIG/LLM_CLIENT fresh from config.json
+    before every request to a config-sensitive blueprint, matching this
+    module's "config changes apply on the very next call, no restart"
+    philosophy (see _build_engine_from_config()). Shared by the RAG and
+    model-selector blueprints -- both read/mutate AppConfig or LLMClient
+    at request time. The project/skills blueprints don't touch AppConfig
+    so they don't need this hook."""
     from osint_workbench.core.config import ConfigLoader
     from osint_workbench.core.llm_client import LLMClient
     from osint_workbench.engine_factory import resolve_backend_params
 
-    config = ConfigLoader().load()
+    config_loader = ConfigLoader()
+    config = config_loader.load()
     base_url, model, temperature, api_key = resolve_backend_params(config)
+    app.config["CONFIG_LOADER"] = config_loader
     app.config["APP_CONFIG"] = config
     app.config["LLM_CLIENT"] = LLMClient(
         base_url=base_url, model=model, temperature=temperature,
@@ -194,7 +212,13 @@ def _refresh_rag_config():
     )
 
 
+_rag_blueprint.before_request(_refresh_request_scoped_config)
+_model_blueprint.before_request(_refresh_request_scoped_config)
+
 app.register_blueprint(_rag_blueprint)
+app.register_blueprint(_model_blueprint)
+app.register_blueprint(_project_blueprint)
+app.register_blueprint(_skills_blueprint)
 
 # Ensure reports directory exists
 paths.reports_dir()  # Ensure the external reports directory exists
@@ -570,8 +594,29 @@ def save_config():
 is_running = False
 last_run_target = ""
 last_run_category = ""
+last_run_project_id = ""
 last_report_filename = ""
 _run_lock = threading.Lock()
+
+
+def _clear_last_run_state() -> None:
+    """Reset gui.py's in-memory "last run" fields after a full data reset
+    so /api/status can't keep echoing a project_id/report_filename whose
+    underlying row/file no longer exists."""
+    global last_run_target, last_run_category, last_run_project_id, last_report_filename
+    last_run_target = ""
+    last_run_category = ""
+    last_run_project_id = ""
+    last_report_filename = ""
+
+
+_admin_blueprint = create_admin_blueprint(
+    run_lock=_run_lock,
+    get_is_running=lambda: is_running,
+    check_origin=_check_same_origin,
+    on_reset=_clear_last_run_state,
+)
+app.register_blueprint(_admin_blueprint)
 
 _engine_logs = []
 _engine_logs_lock = threading.Lock()
@@ -668,26 +713,26 @@ for _event_type in EventType:
 
 @app.route("/api/run", methods=["POST"])
 def api_run():
-    global is_running, last_run_target, last_run_category, last_report_filename, _current_engine
+    global is_running, last_run_target, last_run_category, last_run_project_id, last_report_filename, _current_engine
     try:
         if not _check_same_origin():
             return jsonify({"success": False, "error": "Cross-origin request rejected"}), 403
 
         data = request.json or {}
-        category = data.get("category", "")
-        target = data.get("target", "")
-        max_rounds = data.get("max_rounds", "Auto")
-        urgency = data.get("urgency", "normal OSINT search")
-
-        if not category or not target:
-            return jsonify({"success": False, "error": "Missing target or category"})
+        from osint_workbench.engine_factory import build_investigation_config
+        config, error = build_investigation_config(
+            data, require_category=True, default_urgency="normal OSINT search",
+        )
+        if error:
+            return jsonify({"success": False, "error": error})
 
         with _run_lock:
             if is_running:
                 return jsonify({"success": False, "error": "An investigation is already in progress"})
             is_running = True
-            last_run_target = target
-            last_run_category = category
+            last_run_target = config.target
+            last_run_category = config.category
+            last_run_project_id = config.project_id or ""
             last_report_filename = ""
 
         with _engine_logs_lock:
@@ -704,9 +749,6 @@ def api_run():
         def run_thread():
             global is_running, _current_engine
             try:
-                config = InvestigationConfig(
-                    target=target, category=category, max_rounds=max_rounds, urgency=urgency,
-                )
                 engine.run_investigation(config)
             except Exception as e:
                 _append_engine_log(f"[-] Thread execution error: {str(e)}")
@@ -759,7 +801,7 @@ def api_stop():
 
 @app.route("/api/status")
 def api_status():
-    global is_running, last_run_target, last_run_category, last_report_filename
+    global is_running, last_run_target, last_run_category, last_run_project_id, last_report_filename
     exists = bool(last_report_filename) and os.path.exists(
         os.path.join(str(paths.reports_dir()), last_report_filename)
     )
@@ -768,7 +810,8 @@ def api_status():
         "report_filename": last_report_filename,
         "exists": exists,
         "target": last_run_target,
-        "category": last_run_category
+        "category": last_run_category,
+        "project_id": last_run_project_id or None
     })
 
 @app.route("/api/logs")

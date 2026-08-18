@@ -109,7 +109,7 @@ def _get_default_config() -> dict:
             "backend": "lm_studio",
             "host": "127.0.0.1",
             "port": 1234,
-            "model": "gemma-4-12b-it-uncensored",
+            "model": "",
             "temperature": 0.7,
             "max_context_tokens": 32768,
             "max_retries": 3,
@@ -118,7 +118,7 @@ def _get_default_config() -> dict:
             "lm_studio": {
                 "endpoint": "http://127.0.0.1:1234/v1",
                 "api_key": "lm-studio",
-                "model": "gemma-4-12b-it-uncensored",
+                "model": "",
                 "temperature": 0.7,
                 "last_tested": None,
             }
@@ -422,7 +422,7 @@ class ConfigLoader:
                 valid_backends[name] = BackendConfig(
                     endpoint=backend_data.get("endpoint", "http://127.0.0.1:1234/v1"),
                     api_key=backend_data.get("api_key", "lm-studio"),
-                    model=backend_data.get("model", "gemma-4-12b-it-uncensored"),
+                    model=backend_data.get("model", ""),
                     temperature=float(backend_data.get("temperature", 0.7)),
                     last_tested=backend_data.get("last_tested", None),
                 )
@@ -492,7 +492,7 @@ class ConfigLoader:
             llm_data = raw["llm"]
             host = llm_data.get("host", "127.0.0.1")
             port = llm_data.get("port", 1234)
-            model = llm_data.get("model", "gemma-4-12b-it-uncensored")
+            model = llm_data.get("model", "")
             temperature = llm_data.get("temperature", 0.7)
 
             raw["backends"] = {
@@ -528,7 +528,7 @@ class ConfigLoader:
             backend=llm_data.get("backend", "lm_studio"),
             host=llm_data.get("host", "127.0.0.1"),
             port=llm_data.get("port", 1234),
-            model=llm_data.get("model", "gemma-4-12b-it-uncensored"),
+            model=llm_data.get("model", ""),
             temperature=llm_data.get("temperature", 0.7),
             max_context_tokens=llm_data.get("max_context_tokens", 32768),
             max_retries=llm_data.get("max_retries", 3),
@@ -564,7 +564,7 @@ class ConfigLoader:
                 backends[name] = BackendConfig(
                     endpoint=backend_data.get("endpoint", "http://127.0.0.1:1234/v1"),
                     api_key=backend_data.get("api_key", "lm-studio"),
-                    model=backend_data.get("model", "gemma-4-12b-it-uncensored"),
+                    model=backend_data.get("model", ""),
                     temperature=backend_data.get("temperature", 0.7),
                     last_tested=backend_data.get("last_tested", None),
                 )

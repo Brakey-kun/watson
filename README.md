@@ -21,9 +21,13 @@ But if you have any suggestion for improvements, fixes, features, or tweaks, I'd
 - **visual reports** — generates slick HTML reports with dark mode, sidebar TOC, card grids, and metadata stats
 - **web dashboard** — flask-based GUI with real-time logs, history viewer, and report previewer
 - **urgency modes** — bump up the intensity for time-sensitive cases
-- **context steering (RAG)** — drag-drop a file or paste a note mid-run and it's tagged by trust tier, then steered into the research loop as a pheromone-weighted hint that reinforces itself the more it pays off
+- **context steering (RAG)** — drag-drop a file or paste a note mid-run and it's tagged by trust tier, then steered into the research loop as a pheromone-weighted hint that reinforces itself the more it pays off. every investigation is its own independent, isolated case — hints and insights never leak into a different investigation
 - **investigation insights panel** — live sidebar view into what's actually steering the research: active hints with their weight and trust tier, doubt-search claims under verification, and the current plan timeline
+- **research strategies** — pick `auto` (the AI decides when it's done), `focused` (fast, lowest-noise, skips the divergent burst-search pass), or `exhaustive_osint_sweep` (broader per-round category checklist, resists stopping early, appends a deterministic claims ledger to the report) — docs are one click away in the dashboard
+- **VRAM-aware model assignment** — detect available GPU VRAM and get a suggested context length, then assign a model straight from a dropdown of what's actually loaded on your backend
 - **model tiers** — assign different models to the thinker/default/small roles independently and hot-swap them mid-session, no restart needed
+- **skills panel** — promote a lesson learned in one investigation into a reusable skill, then toggle which ones are active for future runs
+- **clear data / reset** — "Clear Data" on the insights panel deletes just the current investigation's case record and uploaded context hints (run history/claims survive); "Reset All Data" in Settings wipes every investigation, project, hint, claim, plan, and learned skill plus all generated reports, no backup, without touching your LLM backend config. Both refuse to run while an investigation is active.
 
 ---
 
@@ -33,7 +37,7 @@ But if you have any suggestion for improvements, fixes, features, or tweaks, I'd
 
 - **Python 3.10+**
 - **LM Studio** (or any OpenAI-compatible local inference server)
-  - load up a model like `gemma-4-12b-it-uncensored` or whatever you prefer
+  - load up whatever model you prefer -- Watson detects what's loaded and auto-selects it (or asks you to pick one in Settings > Assign Model to Backend if there's more than one)
   - start the local server (default port `1234`)
 
 ### run it

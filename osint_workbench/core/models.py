@@ -22,7 +22,7 @@ class BackendConfig:
 
     endpoint: str = "http://127.0.0.1:1234/v1"
     api_key: str = "lm-studio"
-    model: str = "gemma-4-12b-it-uncensored"
+    model: str = ""
     temperature: float = 0.7
     last_tested: Optional[str] = None  # ISO timestamp or None
 
@@ -44,7 +44,7 @@ class LLMConfig:
     backend: str = "lm_studio"
     host: str = "127.0.0.1"
     port: int = 1234
-    model: str = "gemma-4-12b-it-uncensored"
+    model: str = ""
     temperature: float = 0.7
     max_context_tokens: int = 32768
     max_retries: int = 3
@@ -176,6 +176,21 @@ class InvestigationConfig:
     lm_studio_url: Optional[str] = None
     enable_multi_engine: bool = True
     enable_pdf: bool = False
+    # Case/project this run belongs to (Projects feature). Optional at the
+    # dataclass/engine level so direct construction (tests, main.py's CLI,
+    # any caller that doesn't use the Projects UI) keeps working -- "you
+    # must pick a project" is enforced in the dashboard UI, not the engine.
+    # When set, RAG hints are read/written under this project's scope
+    # instead of GLOBAL_SCOPE (see rag_ingest.py / engine.py's hint reads).
+    project_id: Optional[str] = None
+    # Which round-loop behavior to run: "auto" (default -- current
+    # adaptive-loop behavior, the LLM decides what to search each round),
+    # "focused" (fewer rounds, skips burst/doubt search -- quick low-noise
+    # lookup), or "exhaustive_osint_sweep" (OSINT-oriented deep-research
+    # style: broader per-round category checklist, resists stopping early,
+    # appends an explicit claims ledger to the report). See engine.py's
+    # STRATEGIES for the authoritative list + docstrings.
+    strategy: str = "auto"
 
 
 @dataclass

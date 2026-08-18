@@ -30,6 +30,7 @@ from werkzeug.utils import secure_filename
 
 from osint_workbench.core.events import Event, EventBus, EventType
 from osint_workbench.core.models import ClaimStatus
+from osint_workbench.core import project_store
 from osint_workbench.core.rag_ingest import extract_upload_text, ingest_context
 from osint_workbench.core.steering_index import SteeringIndex
 from osint_workbench.multimedia.models import MediaType
@@ -108,6 +109,7 @@ def create_rag_blueprint(
                 )
             mime_type = EXTENSION_TO_MIME.get(ext, "application/octet-stream")
             target = request.form.get("target", "").strip() or "the current investigation subject"
+            project_id = request.form.get("project_id", "").strip() or None
 
             tmp_fd, tmp_path = tempfile.mkstemp(suffix=ext)
             os.close(tmp_fd)
@@ -135,6 +137,7 @@ def create_rag_blueprint(
                     result = ingest_context(
                         text, target=target, trust_tier=trust_tier,
                         llm_client=llm_client, steering_index=steering_index,
+                        project_id=project_id,
                         model=tier_model, temperature=tier_temperature,
                     )
                     logger.info(
@@ -172,6 +175,7 @@ def create_rag_blueprint(
         if not text:
             return jsonify({"success": False, "error": "No file or text provided"}), 400
         target = str(data.get("target", "")).strip() or "the current investigation subject"
+        project_id = str(data.get("project_id") or "").strip() or None
 
         def _ingest_snippet():
             event_investigation_id = get_investigation_id() or ""
@@ -179,6 +183,7 @@ def create_rag_blueprint(
                 result = ingest_context(
                     text, target=target, trust_tier="typed_snippet",
                     llm_client=llm_client, steering_index=steering_index,
+                    project_id=project_id,
                     model=tier_model, temperature=tier_temperature,
                 )
                 logger.info("RAG ingest wrote %d hint(s) from typed snippet", result.slot_count)
@@ -209,24 +214,35 @@ def create_rag_blueprint(
         source-category yields), unresolved claims, and the current plan
         timeline for one investigation.
 
-        Query param `investigation_id` selects the investigation
-        (defaults to the currently tracked one, if any). RAG hints are
-        always read from SteeringIndex.GLOBAL_SCOPE in addition to the
-        given investigation_id -- see rag_ingest module docstring for why
-        hints can't reliably be scoped to one investigation today.
+        Query param `investigation_id` selects the investigation (defaults
+        to the currently tracked one, if any). Query param `project_id`
+        selects which investigation's independent scope to read hints
+        from -- when present, hints are read ONLY from that project's own
+        steering scope (see project_store.steering_scope), mirroring
+        engine.py's _format_hint_context exclusive-read contract, so a
+        different investigation's hints can never leak into this panel.
+        With no project_id, falls back to SteeringIndex.GLOBAL_SCOPE plus
+        the given investigation_id's own scope (pre-Projects behavior, for
+        callers that never had a project_id to begin with).
         """
         steering_index = current_app.config.get("STEERING_INDEX")
         outcome_memory = current_app.config.get("OUTCOME_MEMORY")
         plan_store = current_app.config.get("PLAN_STORE")
 
         investigation_id = request.args.get("investigation_id") or get_investigation_id()
+        project_id = request.args.get("project_id") or None
 
         hints = []
         source_categories = []
         if steering_index is not None:
-            hint_entries = list(steering_index.top(SteeringIndex.GLOBAL_SCOPE, "hint", k=20))
-            if investigation_id:
-                hint_entries += steering_index.top(investigation_id, "hint", k=20)
+            if project_id:
+                hint_entries = list(
+                    steering_index.top(project_store.steering_scope(project_id), "hint", k=20)
+                )
+            else:
+                hint_entries = list(steering_index.top(SteeringIndex.GLOBAL_SCOPE, "hint", k=20))
+                if investigation_id:
+                    hint_entries += steering_index.top(investigation_id, "hint", k=20)
             hints = [
                 {
                     "payload": e.payload,
@@ -275,6 +291,7 @@ def create_rag_blueprint(
         return jsonify({
             "success": True,
             "investigation_id": investigation_id,
+            "project_id": project_id,
             "hints": hints,
             "source_categories": source_categories,
             "claims": claims,

@@ -12,7 +12,7 @@ import urllib.parse
 import uuid
 from typing import Optional
 
-from osint_workbench.core import plan_object
+from osint_workbench.core import plan_object, project_store
 from osint_workbench.core.events import Event, EventBus, EventType
 from osint_workbench.core.fetcher import ConcurrentFetcher
 from osint_workbench.core.llm_client import LLMClient, LLMClientError
@@ -93,6 +93,63 @@ _GEOCODE_PROMPT_TEMPLATE = (
     "Return ONLY a JSON object containing keys: 'lat', 'lng', 'street', 'city', 'state', 'zip'. "
     "Do not include markdown blocks."
 )
+
+
+# Investigation strategies (Requirement: user can pick a search plan/
+# strategy, or let the AI choose): authoritative identifier -> plain-
+# language description surfaced by the strategy selector's docs UI.
+# "auto" is the default and preserves the engine's original behavior
+# exactly -- picking it (or omitting strategy entirely) changes nothing.
+STRATEGIES = {
+    "auto": (
+        "The AI decides what to search each round and stops once it judges "
+        "the investigation sufficiently complete. Default behavior -- best "
+        "general-purpose choice when you don't have a strong opinion."
+    ),
+    "focused": (
+        "Fewer rounds, skips the divergent burst-search seeding pass and "
+        "doubt-search verification-query dispatch. Fastest, lowest-noise "
+        "option for a quick read on a target rather than a deep profile."
+    ),
+    "exhaustive_osint_sweep": (
+        "OSINT-oriented deep-research style. Replan prompts explicitly check "
+        "coverage against a standard OSINT category checklist (social media, "
+        "public/court records, breach/leak exposure, employment history, "
+        "image/reverse-search leads, associated persons) before considering "
+        "the investigation done, resists stopping early (a bounded number of "
+        "forced continuations kick in when the queue would otherwise empty "
+        "out), and appends an explicit Claims Ledger to the final report -- "
+        "every tracked fact with its source URL(s) and corroboration status, "
+        "written exactly as recorded rather than smoothed over by narrative "
+        "synthesis. Slower and noisier than 'auto'; best for a thorough case "
+        "file rather than a quick lookup."
+    ),
+}
+DEFAULT_STRATEGY = "auto"
+
+# The checklist _build_replan_prompt/_build_burst_search_prompt cite for
+# the exhaustive_osint_sweep strategy -- kept as one shared tuple so the
+# wording can't drift between the two prompts.
+_OSINT_COVERAGE_CHECKLIST = (
+    "social media presence",
+    "public/court records",
+    "data breach/leak exposure",
+    "employment/professional history",
+    "image/reverse-image leads",
+    "associated persons/network",
+)
+
+# Cap on how many times the exhaustive_osint_sweep strategy is allowed to
+# override an empty-queue stop and force one more thinker-tier replan
+# instead -- bounded so a target with genuinely nothing left to find can't
+# loop until max_rounds burning tokens for zero new findings.
+MAX_EXHAUSTIVE_FORCED_CONTINUATIONS = 2
+
+# "focused" strategy's max_rounds ceiling when the user left max_rounds at
+# its "Auto" default -- an explicit numeric choice from the user is always
+# respected as-is (this only tightens the *default*, never overrides an
+# explicit request for more rounds).
+FOCUSED_DEFAULT_MAX_ROUNDS = 8
 
 
 class OSINTEngine:
@@ -361,22 +418,35 @@ class OSINTEngine:
         except (ValueError, TypeError):
             return 50
 
-    def _format_hint_context(self, investigation_id: str, k: int = 6) -> str:
+    def _format_hint_context(
+        self, investigation_id: str, k: int = 6, project_id: Optional[str] = None,
+    ) -> str:
         """Format user-provided RAG hints (steering_index entry_type='hint')
         as a prompt fragment, or "" if none exist.
 
-        rag_ingest.ingest_context() writes hints to GLOBAL_SCOPE (see its
-        module docstring for why investigation-scoped writes are unsafe
-        today), so GLOBAL_SCOPE is read unconditionally here.
-        investigation_id's own scope is also read for forward
-        compatibility, in case a future caller ever writes hints there
+        When `project_id` is set, reads ONLY that project's own steering
+        scope (see project_store.steering_scope) -- deliberately NOT also
+        GLOBAL_SCOPE, since additively reading both would leak a previous,
+        unrelated case's aliases/handles/emails into this project's
+        replan prompt, defeating the whole point of per-project isolation
+        (Requirement: RAG hints are scoped per project, not globally).
+
+        When no project_id is available (callers that don't supply one --
+        main.py's CLI, tests), falls back to the original behavior: GLOBAL_SCOPE
+        unconditionally, plus investigation_id's own scope for forward
+        compatibility in case a future caller ever writes hints there
         directly.
         """
         if not self._steering_index:
             return ""
-        hints = list(self._steering_index.top(SteeringIndex.GLOBAL_SCOPE, "hint", k=k))
-        if investigation_id != SteeringIndex.GLOBAL_SCOPE:
-            hints += self._steering_index.top(investigation_id, "hint", k=k)
+        if project_id:
+            hints = list(
+                self._steering_index.top(project_store.steering_scope(project_id), "hint", k=k)
+            )
+        else:
+            hints = list(self._steering_index.top(SteeringIndex.GLOBAL_SCOPE, "hint", k=k))
+            if investigation_id != SteeringIndex.GLOBAL_SCOPE:
+                hints += self._steering_index.top(investigation_id, "hint", k=k)
         if not hints:
             return ""
         hints.sort(key=lambda e: e.pheromone, reverse=True)
@@ -412,6 +482,19 @@ class OSINTEngine:
                 f"Aggressively generate targeted search dorks and try alternative sources."
             )
 
+        exhaustive_instruction = ""
+        if config.strategy == "exhaustive_osint_sweep":
+            checklist = ", ".join(_OSINT_COVERAGE_CHECKLIST)
+            exhaustive_instruction = (
+                f"\nEXHAUSTIVE OSINT SWEEP MODE: Before setting 'continue_research' "
+                f"to false, explicitly check current findings against this standard "
+                f"OSINT category checklist: {checklist}. Propose queries for any "
+                f"category not yet meaningfully covered. Only set 'continue_research' "
+                f"to false once every category has either turned up findings or been "
+                f"genuinely exhausted -- do not stop early just because the most "
+                f"obvious leads are gone.\n"
+            )
+
         reason_options = ", ".join(
             f"'{r.value}'" for r in QueryReason
             if r not in (QueryReason.BURST_SEED, QueryReason.DOUBT_VERIFICATION)
@@ -420,8 +503,8 @@ class OSINTEngine:
         return (
             f"You are an expert OSINT planner. Analyze findings for target "
             f"'{config.target}' (type: {config.category}).\n"
-            f"Urgency Mode: {config.urgency}{urgency_instruction}\n"
-            f"{self._format_hint_context(plan.investigation_id)}"
+            f"Urgency Mode: {config.urgency}{urgency_instruction}{exhaustive_instruction}\n"
+            f"{self._format_hint_context(plan.investigation_id, project_id=config.project_id)}"
             f"Plan state at round {current_round}: {plan.state.value} "
             f"(this is why a fresh plan is needed now).\n"
             f"Existing hypotheses: "
@@ -597,12 +680,24 @@ class OSINTEngine:
             # Burst search (if enabled) seeds the plan with the highest-
             # scoring of several divergent candidate angles instead of the
             # single deterministic fresh plan _load_or_init_plan builds.
-            burst_plan = self._run_burst_search(investigation_id, config)
+            # Burst search is skipped entirely for "focused" (Requirement:
+            # fewer rounds, skip the divergent seeding pass) -- that
+            # strategy's whole point is minimizing LLM calls up front for
+            # a fast, low-noise lookup.
+            burst_plan = (
+                self._run_burst_search(investigation_id, config)
+                if config.strategy != "focused" else None
+            )
             burst_categories = (
                 {q.category for q in burst_plan.queued_queries} if burst_plan else None
             )
             plan = burst_plan or self._load_or_init_plan(investigation_id, config)
             target_rounds = self._resolve_max_rounds(config.max_rounds)
+            if config.strategy == "focused" and config.max_rounds in ("Auto", "auto"):
+                # Only tightens the *default* -- an explicit numeric
+                # max_rounds from the user is always respected as-is, even
+                # under "focused".
+                target_rounds = min(target_rounds, FOCUSED_DEFAULT_MAX_ROUNDS)
 
             all_findings_map, plan, paused = self._run_adaptive_loop(
                 state, config, all_findings_map, plan, format_params,
@@ -666,10 +761,20 @@ class OSINTEngine:
     ) -> str:
         """Build the thinker-tier prompt that proposes `probe_count`
         divergent first-pass research angles for burst search."""
+        checklist_instruction = ""
+        if config.strategy == "exhaustive_osint_sweep":
+            checklist = ", ".join(_OSINT_COVERAGE_CHECKLIST)
+            checklist_instruction = (
+                f"EXHAUSTIVE OSINT SWEEP MODE: spread the {probe_count} angles "
+                f"across this standard OSINT category checklist as much as "
+                f"possible rather than clustering on the most obvious one: "
+                f"{checklist}.\n"
+            )
         return (
             f"You are an expert OSINT investigator planning a fresh investigation.\n"
             f"Target: '{config.target}' (Category: {config.category})\n"
-            f"{self._format_hint_context(investigation_id)}\n"
+            f"{self._format_hint_context(investigation_id, project_id=config.project_id)}\n"
+            f"{checklist_instruction}"
             f"Propose {probe_count} DIFFERENT, genuinely divergent research angles "
             f"for this investigation -- each should pursue a distinct kind of "
             f"evidence (e.g. one might chase social presence, another public "
@@ -885,10 +990,22 @@ class OSINTEngine:
         the highest-value unresolved claim.
 
         Mutates `plan` (may enqueue one query) and persists claim state via
-        self._outcome_memory. No-op without an OutcomeMemory configured or
-        when config.doubt_search.enabled is False.
+        self._outcome_memory. No-op without an OutcomeMemory configured.
+
+        Claim extraction/contradiction detection (tracking) runs whenever
+        config.doubt_search.enabled is True OR config.strategy is
+        "exhaustive_osint_sweep" -- that strategy's Claims Ledger report
+        section depends on claims actually being tracked even if the user
+        left doubt_search disabled. The bounded verification-query dispatch
+        below it still respects doubt_search.enabled on its own, though:
+        forcing that on too would silently override the user's own
+        cost/speed choice (extra LLM-free but round/query-budget-consuming
+        searches) rather than just backfilling report content.
         """
-        if not self._outcome_memory or not self._config.doubt_search.enabled:
+        track_claims = (
+            self._config.doubt_search.enabled or config.strategy == "exhaustive_osint_sweep"
+        )
+        if not self._outcome_memory or not track_claims:
             return
 
         round_findings = [
@@ -918,6 +1035,12 @@ class OSINTEngine:
                 # pick_target() reconsiders it. UNRESOLVED is terminal.
                 claim.status = ClaimStatus.FLAGGED
                 self._outcome_memory.save_claim(claim)
+
+        # Bounded verification-query dispatch below is a distinct,
+        # costlier sub-feature -- still gated on the user's own
+        # doubt_search.enabled choice regardless of strategy.
+        if not self._config.doubt_search.enabled:
+            return
 
         all_claims = self._outcome_memory.get_claims(investigation_id)
         doubt_budget = DoubtBudget(
@@ -992,6 +1115,10 @@ class OSINTEngine:
             caller should proceed to report generation.
         """
         investigation_id = state.investigation_id
+        # exhaustive_osint_sweep's bounded override of the empty-queue
+        # stop condition (see below) -- counts how many times it's fired
+        # this run so it can't loop past MAX_EXHAUSTIVE_FORCED_CONTINUATIONS.
+        forced_continuations = 0
 
         while current_round <= target_rounds:
             # Check stop signal FIRST (before pause check)
@@ -1141,11 +1268,16 @@ class OSINTEngine:
                     # doubt-search verification query, run BEFORE reconcile()
                     # so a freshly-enqueued verification query is already
                     # counted when reconcile() decides EXPLORING vs
-                    # QUEUE_EXHAUSTED for the next round.
-                    self._run_doubt_search(
-                        investigation_id, plan, scored_new,
-                        len(all_findings_map), current_round, config,
-                    )
+                    # QUEUE_EXHAUSTED for the next round. Skipped entirely
+                    # for "focused" (Requirement: fewer rounds, skip doubt
+                    # search) regardless of the global doubt_search.enabled
+                    # setting -- that strategy's whole point is minimizing
+                    # LLM calls/round-budget spend for this specific run.
+                    if config.strategy != "focused":
+                        self._run_doubt_search(
+                            investigation_id, plan, scored_new,
+                            len(all_findings_map), current_round, config,
+                        )
 
             # Deterministically advance the plan for the next round --
             # prunes now-hot-duplicate queued queries via the steering
@@ -1153,20 +1285,27 @@ class OSINTEngine:
             if self._steering_index:
                 plan = plan_object.reconcile(plan, self._steering_index)
                 self._steering_index.decay(investigation_id, "query", rounds_elapsed=1.0)
-                # RAG hints live in GLOBAL_SCOPE (see rag_ingest module
-                # docstring) and clear_scope() no-ops there by design, so
-                # decay is the only thing that ever retires a stale one --
-                # without it an old OCR mistake would steer every future
+                # RAG hints live in GLOBAL_SCOPE and/or their project's
+                # own scope (see rag_ingest module docstring) and
+                # clear_scope() no-ops on both by design, so decay is the
+                # only thing that ever retires a stale one -- without it
+                # an old OCR mistake would steer every future
                 # investigation forever, only ever reinforced, never fading.
                 # Half-life is deliberately much longer than the query
                 # default (30 vs. 6 rounds): a long single run (up to 50
                 # rounds, see _resolve_max_rounds) must not mute the
                 # user's own uploaded context partway through, and since
-                # these rows are global they'd otherwise carry decayed
-                # state into the *next* investigation too.
+                # these rows outlive one investigation they'd otherwise
+                # carry decayed state into the *next* investigation (or
+                # the next run in the same project) too.
                 self._steering_index.decay(
                     SteeringIndex.GLOBAL_SCOPE, "hint", rounds_elapsed=1.0, half_life_rounds=30.0
                 )
+                if config.project_id:
+                    self._steering_index.decay(
+                        project_store.steering_scope(config.project_id), "hint",
+                        rounds_elapsed=1.0, half_life_rounds=30.0,
+                    )
             elif not plan.queued_queries:
                 # No steering index configured, so reconcile() (which
                 # requires one to fuzzy-dedup the queue) can't run. Mirror
@@ -1195,10 +1334,30 @@ class OSINTEngine:
             # (reconcile() didn't run) can't turn this into an infinite
             # empty-round loop.
             if not queries_this_round and not plan.queued_queries:
-                logger.info(
-                    "Plan exhausted with no queries at round %d; stopping.", current_round
-                )
-                break
+                if (
+                    config.strategy == "exhaustive_osint_sweep"
+                    and forced_continuations < MAX_EXHAUSTIVE_FORCED_CONTINUATIONS
+                ):
+                    # Resist stopping early: plan.state is already
+                    # QUEUE_EXHAUSTED (set by reconcile() above, or the
+                    # no-steering-index fallback below it), so
+                    # needs_replan() fires a real thinker-tier replan next
+                    # iteration instead of stopping here -- that replan's
+                    # prompt (see _build_replan_prompt) explicitly asks
+                    # which OSINT categories haven't been covered yet.
+                    forced_continuations += 1
+                    logger.info(
+                        "Exhaustive OSINT sweep: plan queue empty at round %d, "
+                        "forcing a broader-coverage replan instead of stopping "
+                        "(%d/%d forced continuations used).",
+                        current_round, forced_continuations,
+                        MAX_EXHAUSTIVE_FORCED_CONTINUATIONS,
+                    )
+                else:
+                    logger.info(
+                        "Plan exhausted with no queries at round %d; stopping.", current_round
+                    )
+                    break
 
             current_round += 1
 
@@ -1248,6 +1407,68 @@ class OSINTEngine:
                 "Failed to write back KB lesson for investigation %s", state.investigation_id
             )
 
+    _CLAIM_STATUS_LABELS = {
+        ClaimStatus.CONFIRMED: "CONFIRMED",
+        ClaimStatus.FLAGGED: "FLAGGED (single source, unverified)",
+        ClaimStatus.VERIFYING: "VERIFYING",
+        ClaimStatus.UNRESOLVED: "UNRESOLVED (conflicting sources)",
+    }
+
+    @staticmethod
+    def _md_cell(value) -> str:
+        """Escape a value for safe embedding in a Markdown table cell.
+
+        Claims Ledger content (predicate/value/sources) originates from
+        LLM-extracted or scraped source text -- untrusted for structural
+        characters. A literal '|' or embedded newline would otherwise
+        break the table into garbage rows in both the .md and rendered
+        HTML report.
+        """
+        text = str(value).replace("|", "\\|").replace("\n", " ").replace("\r", " ").strip()
+        return text or "-"
+
+    def _build_claims_ledger_section(self, investigation_id: str) -> str:
+        """Deterministic 'Claims Ledger' report section for the
+        exhaustive_osint_sweep strategy: every tracked claim (subject/
+        predicate/value), its corroboration status, confidence, and source
+        URL(s) -- built directly from OutcomeMemory data, not the LLM, so
+        contradictions/uncertainty are surfaced exactly as tracked rather
+        than however the synthesis LLM chose to phrase (or silently omit)
+        them. See _run_doubt_search: claim tracking is force-enabled for
+        this strategy even when config.doubt_search.enabled is False, so
+        this section is never empty just because that setting was off.
+
+        Returns a "no claims tracked" note (never a blank string) when
+        there is nothing to show, so an empty ledger always reads as an
+        explicit, understood outcome rather than a silently missing one.
+        """
+        header = "\n\n## Claims Ledger\n\n"
+        if not self._outcome_memory:
+            return header + "*No claims tracked -- outcome memory is not configured.*\n"
+        claims = self._outcome_memory.get_claims(investigation_id)
+        if not claims:
+            return header + "*No claims tracked for this investigation.*\n"
+
+        rows = []
+        for claim in sorted(claims, key=lambda c: (c.status.value, -c.confidence)):
+            sources = ", ".join(claim.source_urls) if claim.source_urls else "(none)"
+            label = self._CLAIM_STATUS_LABELS.get(claim.status, claim.status.value)
+            rows.append(
+                f"| {self._md_cell(claim.predicate)} | {self._md_cell(claim.value)} | "
+                f"{self._md_cell(label)} | {claim.confidence:.2f} | {self._md_cell(sources)} |"
+            )
+        table = "\n".join(rows)
+        return (
+            f"{header}"
+            f"Every fact this investigation tracked, exactly as recorded -- not "
+            f"smoothed over by narrative synthesis. Uncertainty is written, not "
+            f"resolved: an UNRESOLVED row means sources disagreed and neither "
+            f"value could be corroborated.\n\n"
+            f"| Fact | Value | Status | Confidence | Source(s) |\n"
+            f"|---|---|---|---|---|\n"
+            f"{table}\n"
+        )
+
     def _finalize_investigation(
         self,
         state: InvestigationState,
@@ -1277,6 +1498,8 @@ class OSINTEngine:
                     synthesis_prompt, model=model, temperature=temperature
                 )
                 report_md = report_response.content
+                if config.strategy == "exhaustive_osint_sweep":
+                    report_md += self._build_claims_ledger_section(investigation_id)
 
                 if self._token_budget:
                     self._token_budget.add_used_tokens(report_response.total_tokens)

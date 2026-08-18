@@ -20,8 +20,8 @@ from osint_workbench.core.connection_tester import test_connection
 from osint_workbench.core.engine import OSINTEngine
 from osint_workbench.core.events import Event, EventBus, EventType
 from osint_workbench.core.llm_client import LLMClient
-from osint_workbench.core.models import InvestigationConfig
 from osint_workbench.core.state import StateManager
+from osint_workbench.engine_factory import build_investigation_config, ensure_active_model
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,7 @@ def create_api_blueprint(
         "is_running": False,
         "investigation_id": None,
         "current_round": 0,
+        "project_id": None,
     }
 
     # --- Log buffer ---
@@ -135,16 +136,26 @@ def create_api_blueprint(
         Requirement 16.5: Lock held only for reading/writing the flag.
         """
         data = request.get_json(force=True, silent=True) or {}
+        config, error = build_investigation_config(data)
+        if error:
+            return jsonify({"success": False, "error": error}), 400
 
-        target = data.get("target", "").strip()
-        if not target:
-            return jsonify({"success": False, "error": "Target is required"}), 400
-
-        category = data.get("category", "Auto-Detect")
-        lm_studio_url = data.get("lm_studio_url")
-        max_rounds = data.get("max_rounds", "Auto")
-        urgency = data.get("urgency", "normal")
-        enable_pdf = data.get("enable_pdf", False)
+        # No model configured (or the last value was itself a guess) --
+        # re-probe the endpoint now rather than let the run fail deep in
+        # the LLM retry loop with an opaque "model not found". Re-checking
+        # every time the active model is a guess (not just when it's
+        # blank) catches the loaded model changing mid-session too --
+        # e.g. LM Studio's JIT loading will silently start serving a
+        # different id instead of erroring.
+        llm_client = current_app.config.get("LLM_CLIENT")
+        if llm_client is not None and (not llm_client.model or llm_client.model_autodetected):
+            resolved_model, model_error = ensure_active_model(
+                llm_client.base_url, "", llm_client.api_key
+            )
+            if model_error:
+                return jsonify({"success": False, "error": model_error}), 400
+            llm_client.model = resolved_model
+            llm_client.model_autodetected = True
 
         # Atomic check-and-set with lock (Requirement 16.1, 16.2)
         with _run_lock:
@@ -163,20 +174,11 @@ def create_api_blueprint(
         investigation_id = str(uuid.uuid4())
         _state["investigation_id"] = investigation_id
         _state["current_round"] = 0
+        _state["project_id"] = config.project_id
 
         # Clear log buffer for new investigation
         with _log_lock:
             _log_buffer.clear()
-
-        # Build investigation config
-        config = InvestigationConfig(
-            target=target,
-            category=category,
-            max_rounds=max_rounds,
-            urgency=urgency,
-            lm_studio_url=lm_studio_url,
-            enable_pdf=enable_pdf,
-        )
 
         # Spawn investigation in a new thread
         def _run_thread():
@@ -187,7 +189,7 @@ def create_api_blueprint(
             """
             try:
                 _append_log(
-                    f"Investigation started: {target} ({category})"
+                    f"Investigation started: {config.target} ({config.category})"
                 )
                 engine.run_investigation(config)
                 _append_log("Investigation completed successfully.")
@@ -218,6 +220,7 @@ def create_api_blueprint(
             "is_running": _state["is_running"],
             "investigation_id": _state["investigation_id"],
             "current_round": _state["current_round"],
+            "project_id": _state.get("project_id"),
         }), 200
 
     # --- GET /api/logs ---
@@ -613,6 +616,7 @@ def create_api_blueprint(
 
             llm_client.base_url = backend_obj.endpoint
             llm_client.model = backend_obj.model
+            llm_client.model_autodetected = False
             llm_client.temperature = backend_obj.temperature
             llm_client.api_key = backend_obj.api_key
             llm_client._client = _OpenAI(
@@ -751,9 +755,17 @@ def create_api_blueprint(
             "temperature": tier_config.temperature,
         }), 200
 
-    # Exposed so create_app() can hand this closure's live investigation id
-    # to create_rag_blueprint() without duplicating _state's tracking here.
+    # Exposed so sibling blueprints registered by the SAME host (rag
+    # blueprint's get_investigation_id, project blueprint's is_running
+    # guard on delete, admin blueprint's reset guard) can read/reuse this
+    # closure's otherwise-private run-tracking state instead of
+    # duplicating _run_lock/_state -- the concurrency contract in
+    # Requirement 16.1/16.2 only holds if there's ever exactly one lock.
     api.get_current_investigation_id = lambda: _state.get("investigation_id")
+    api.run_lock = _run_lock
+    api.get_is_running = lambda: _state["is_running"]
+    api.get_active_project_id = lambda: (_state.get("project_id") if _state["is_running"] else None)
+    api.reset_state = lambda: _state.update({"investigation_id": None, "current_round": 0, "project_id": None})
     return api
 
 
